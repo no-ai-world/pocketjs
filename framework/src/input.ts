@@ -41,6 +41,7 @@ import { analogX, analogY } from "./frame.ts";
 import { getHost, getOps, hostViewport, type HostOps } from "./host.ts";
 import { get as pakGet } from "./pak.ts";
 import type { NodeMirror } from "./renderer.ts";
+import { touches } from "./touch.ts";
 
 let root: NodeMirror | null = null;
 let focused: NodeMirror | null = null;
@@ -760,6 +761,10 @@ export function handleFrame(buttons: number): void {
   const released = prevButtons & ~buttons;
   prevButtons = buttons;
   if (cursor && cursorFrame(buttons, pressed, released)) return;
+  // Desktop hosts (windows-widget / macos-widget) deliver a real pointer as
+  // the primary touch contact + CIRCLE press. Resolve hover/focus from that
+  // contact so ordinary onPress apps work without enableCursor or svc.
+  if (pointerContactFrame(buttons, pressed, released)) return;
   if (released & BTN.CIRCLE) setPressedNode(null);
   if (pressed === 0) return;
   if (pressed & BTN.DOWN) moveFocus("down");
@@ -770,4 +775,26 @@ export function handleFrame(buttons: number): void {
     setPressedNode(focused);
     firePress();
   }
+}
+
+/** Real-pointer frame for hosts that pack the OS cursor as a touch contact. */
+function pointerContactFrame(buttons: number, pressed: number, released: number): boolean {
+  // 没有触点时退回 d-pad 模型
+  const list = touches();
+  if (list.length === 0) return false;
+  const contact = list[0]!;
+  const target = hitFocusable(contact.x, contact.y);
+  if (target !== focused) focusNode(target);
+  if (pressed & BTN.CIRCLE && target) {
+    setPressedNode(target);
+  }
+  if (released & BTN.CIRCLE) {
+    const fire = pressedNode !== null && target === pressedNode;
+    setPressedNode(null);
+    if (fire) firePress();
+  } else if (pressedNode && target !== pressedNode) {
+    // 拖离按下目标时取消 active 视觉
+    setPressedNode(null);
+  }
+  return true;
 }

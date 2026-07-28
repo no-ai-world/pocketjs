@@ -6,6 +6,7 @@ import solidPreset from "babel-preset-solid";
 import tsPreset from "@babel/preset-typescript"; // untyped - see framework/compiler/ambient.d.ts
 import { transformVueJsxVapor } from "vue-jsx-vapor/api";
 import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { compileVueSfc } from "./vue-sfc-compile.ts";
 import {
   propsHelperCode,
@@ -28,58 +29,57 @@ import type { PocketFramework } from "../src/config.ts";
 
 export type { PocketFramework };
 
-export const RENDERER_PATH = new URL("../src/renderer.ts", import.meta.url).pathname;
-export const RENDERER_SOLID_PATH = new URL("../src/renderer-solid.ts", import.meta.url).pathname;
-export const RENDERER_VUE_VAPOR_PATH = new URL("../src/renderer-vue-vapor.ts", import.meta.url).pathname;
+// Resolve package files with fileURLToPath so Windows gets `D:\...` rather
+// than URL.pathname's `/D:/...`, which breaks Bun.resolve/Bun.write.
+export const RENDERER_PATH = fileURLToPath(new URL("../src/renderer.ts", import.meta.url));
+export const RENDERER_SOLID_PATH = fileURLToPath(new URL("../src/renderer-solid.ts", import.meta.url));
+export const RENDERER_VUE_VAPOR_PATH = fileURLToPath(
+  new URL("../src/renderer-vue-vapor.ts", import.meta.url),
+);
 
-const INDEX_PATH = new URL("../src/index.ts", import.meta.url).pathname;
-const INDEX_VUE_VAPOR_PATH = new URL("../src/index-vue-vapor.ts", import.meta.url).pathname;
-const ANIMATION_PATH = new URL("../src/animation.ts", import.meta.url).pathname;
-const COMPONENTS_PATH = new URL("../src/components.ts", import.meta.url).pathname;
-const COMPONENTS_VUE_VAPOR_PATH = new URL("../src/components-vue-vapor.ts", import.meta.url).pathname;
-const CONFIG_PATH = new URL("../src/config.ts", import.meta.url).pathname;
-const CLOCK_PATH = new URL("../src/clock.ts", import.meta.url).pathname;
-const DEVTOOLS_PATH = new URL("../src/devtools.ts", import.meta.url).pathname;
-const EFFECTS_PATH = new URL("../src/effects.ts", import.meta.url).pathname;
-const HOST_PATH = new URL("../src/host.ts", import.meta.url).pathname;
-const HOT_PATH = new URL("../src/hot.ts", import.meta.url).pathname;
-const INPUT_API_PATH = new URL("../src/input-api.ts", import.meta.url).pathname;
-const LAUNCHER_PATH = new URL("../src/launcher.ts", import.meta.url).pathname;
-const LIFECYCLE_PATH = new URL("../src/lifecycle.ts", import.meta.url).pathname;
-const LIFECYCLE_VUE_VAPOR_PATH = new URL("../src/lifecycle-vue-vapor.ts", import.meta.url).pathname;
-const OSK_PATH = new URL("../src/osk.tsx", import.meta.url).pathname;
-const MANIFEST_PATH = new URL("../src/manifest/index.ts", import.meta.url).pathname;
-const PACKAGE_PATH = new URL(
-  "../../contracts/spec/pocket-package.ts",
-  import.meta.url,
-).pathname;
-const PLATFORM_PATH = new URL("../src/platform.ts", import.meta.url).pathname;
-const PRELUDE_PATH = new URL("../src/prelude.ts", import.meta.url).pathname;
-const GENERATED_STYLES_PATH = new URL(
-  "../src/styles.generated.ts",
-  import.meta.url,
-).pathname;
-const VITA_PACKAGE_PATH = new URL(
-  "../../tools/vita-package.ts",
-  import.meta.url,
-).pathname;
-const VUE_VAPOR_RUNTIME_PATH = new URL(
-  "../../node_modules/vue/dist/vue.runtime-with-vapor.esm-browser.prod.js",
-  import.meta.url,
-).pathname;
-const SOLID_RUNTIME_PATH = new URL(
-  "../../node_modules/solid-js/dist/solid.js",
-  import.meta.url,
-).pathname;
-const SOLID_UNIVERSAL_RUNTIME_PATH = new URL(
-  "../../node_modules/solid-js/universal/dist/universal.js",
-  import.meta.url,
-).pathname;
+const INDEX_PATH = fileURLToPath(new URL("../src/index.ts", import.meta.url));
+const INDEX_VUE_VAPOR_PATH = fileURLToPath(new URL("../src/index-vue-vapor.ts", import.meta.url));
+const ANIMATION_PATH = fileURLToPath(new URL("../src/animation.ts", import.meta.url));
+const COMPONENTS_PATH = fileURLToPath(new URL("../src/components.ts", import.meta.url));
+const COMPONENTS_VUE_VAPOR_PATH = fileURLToPath(
+  new URL("../src/components-vue-vapor.ts", import.meta.url),
+);
+const CONFIG_PATH = fileURLToPath(new URL("../src/config.ts", import.meta.url));
+const CLOCK_PATH = fileURLToPath(new URL("../src/clock.ts", import.meta.url));
+const DEVTOOLS_PATH = fileURLToPath(new URL("../src/devtools.ts", import.meta.url));
+const EFFECTS_PATH = fileURLToPath(new URL("../src/effects.ts", import.meta.url));
+const HOST_PATH = fileURLToPath(new URL("../src/host.ts", import.meta.url));
+const HOT_PATH = fileURLToPath(new URL("../src/hot.ts", import.meta.url));
+const INPUT_API_PATH = fileURLToPath(new URL("../src/input-api.ts", import.meta.url));
+const LAUNCHER_PATH = fileURLToPath(new URL("../src/launcher.ts", import.meta.url));
+const LIFECYCLE_PATH = fileURLToPath(new URL("../src/lifecycle.ts", import.meta.url));
+const LIFECYCLE_VUE_VAPOR_PATH = fileURLToPath(
+  new URL("../src/lifecycle-vue-vapor.ts", import.meta.url),
+);
+const OSK_PATH = fileURLToPath(new URL("../src/osk.tsx", import.meta.url));
+const MANIFEST_PATH = fileURLToPath(new URL("../src/manifest/index.ts", import.meta.url));
+const PACKAGE_PATH = fileURLToPath(
+  new URL("../../contracts/spec/pocket-package.ts", import.meta.url),
+);
+const PLATFORM_PATH = fileURLToPath(new URL("../src/platform.ts", import.meta.url));
+const PRELUDE_PATH = fileURLToPath(new URL("../src/prelude.ts", import.meta.url));
+const GENERATED_STYLES_PATH = fileURLToPath(new URL("../src/styles.generated.ts", import.meta.url));
+const VITA_PACKAGE_PATH = fileURLToPath(new URL("../../tools/vita-package.ts", import.meta.url));
+const VUE_VAPOR_RUNTIME_PATH = fileURLToPath(
+  new URL("../../node_modules/vue/dist/vue.runtime-with-vapor.esm-browser.prod.js", import.meta.url),
+);
+const SOLID_RUNTIME_PATH = fileURLToPath(
+  new URL("../../node_modules/solid-js/dist/solid.js", import.meta.url),
+);
+const SOLID_UNIVERSAL_RUNTIME_PATH = fileURLToPath(
+  new URL("../../node_modules/solid-js/universal/dist/universal.js", import.meta.url),
+);
 
 const PACKAGE_NAME = "@pocketjs/framework";
-const CACHE_DIR = new URL("../../.cache/transforms/", import.meta.url).pathname;
+// fileURLToPath: URL.pathname is `/D:/...` on Windows and breaks Bun.write/mkdir.
+const CACHE_DIR = fileURLToPath(new URL("../../.cache/transforms/", import.meta.url));
 const CACHE_VERSION = "2"; // manual backstop; compiler sources are hashed in below
-const COMPILER_DIR = new URL("./", import.meta.url).pathname;
+const COMPILER_DIR = fileURLToPath(new URL("./", import.meta.url));
 
 /**
  * Hash of this package's own compiler sources: transform behavior lives here,
@@ -98,8 +98,9 @@ async function hashCompilerSources(): Promise<string> {
   const pending = [new URL("./jsx-plugin.ts", import.meta.url)];
   while (pending.length > 0) {
     const url = pending.pop()!;
-    if (!url.pathname.startsWith(COMPILER_DIR)) continue;
-    const name = url.pathname.slice(COMPILER_DIR.length);
+    const filePath = fileURLToPath(url);
+    if (!filePath.startsWith(COMPILER_DIR)) continue;
+    const name = filePath.slice(COMPILER_DIR.length).replace(/\\/g, "/");
     if (sources.has(name)) continue;
     const source = await Bun.file(url).text();
     sources.set(name, source);

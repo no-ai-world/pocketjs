@@ -89,12 +89,7 @@ impl Gpu {
         compatible_surface: Option<&wgpu::Surface<'_>>,
         power_preference: wgpu::PowerPreference,
     ) -> Result<Self> {
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference,
-                compatible_surface,
-                force_fallback_adapter: false,
-            })
+        let adapter = pick_adapter(&instance, compatible_surface, power_preference)
             .await
             .context("no compatible GPU adapter")?;
         let info = adapter.get_info();
@@ -104,12 +99,21 @@ impl Gpu {
             info.device_type,
             power_preference
         );
+        // Widget hosts ask for LowPower: keep device limits modest so Windows
+        // discrete adapters do not reserve game-sized GPU heaps for a sticky note.
+        let required_limits = match power_preference {
+            wgpu::PowerPreference::LowPower => widget_limits(&adapter),
+            _ => wgpu::Limits::default(),
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("pocket3d"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::default(),
+                required_limits,
+                memory_hints: match power_preference {
+                    wgpu::PowerPreference::LowPower => wgpu::MemoryHints::MemoryUsage,
+                    _ => wgpu::MemoryHints::default(),
+                },
                 trace: wgpu::Trace::Off,
             })
             .await
@@ -121,6 +125,55 @@ impl Gpu {
             queue,
         })
     }
+}
+
+/// Pick an adapter honoring power preference more strictly than wgpu's default.
+async fn pick_adapter(
+    instance: &wgpu::Instance,
+    compatible_surface: Option<&wgpu::Surface<'_>>,
+    power_preference: wgpu::PowerPreference,
+) -> Option<wgpu::Adapter> {
+    // 按功耗偏好选择适配器
+    if power_preference == wgpu::PowerPreference::LowPower {
+        let mut adapters = instance.enumerate_adapters(wgpu::Backends::all());
+        // Prefer iGPU for ambient widgets; fall back to dGPU before WARP/CPU.
+        adapters.sort_by_key(|adapter| match adapter.get_info().device_type {
+            wgpu::DeviceType::IntegratedGpu => 0u8,
+            wgpu::DeviceType::DiscreteGpu => 1,
+            wgpu::DeviceType::VirtualGpu => 2,
+            wgpu::DeviceType::Other => 3,
+            wgpu::DeviceType::Cpu => 4,
+        });
+        for adapter in adapters {
+            if let Some(surface) = compatible_surface
+                && !adapter.is_surface_supported(surface)
+            {
+                continue;
+            }
+            return Some(adapter);
+        }
+    }
+    instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference,
+            compatible_surface,
+            force_fallback_adapter: false,
+        })
+        .await
+        .ok()
+}
+
+/// Modest 2D-UI limits for ambient widget hosts.
+fn widget_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
+    // 收紧 widget 设备上限
+    let supported = adapter.limits();
+    let mut limits = wgpu::Limits::downlevel_defaults();
+    limits.max_texture_dimension_2d = supported.max_texture_dimension_2d.min(8192);
+    limits.max_texture_dimension_1d = supported.max_texture_dimension_1d.min(8192);
+    limits.max_buffer_size = supported.max_buffer_size.min(256 * 1024 * 1024);
+    limits.max_storage_buffer_binding_size =
+        supported.max_storage_buffer_binding_size.min(128 * 1024 * 1024);
+    limits
 }
 
 /// An offscreen color target that can be rendered to and read back.

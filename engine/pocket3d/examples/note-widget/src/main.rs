@@ -67,6 +67,9 @@ struct NoteGame {
     /// The guest's ••• menu is up: stop claiming header drags/resizes so
     /// clicks anywhere reach the backdrop and close it.
     guest_menu_open: bool,
+    /// True only for the note guest — generic desktop apps must not lose
+    /// clicks to the note header drag affordance.
+    note_chrome: bool,
     /// Window scale factor from the latest tick (cursor px → logical).
     scale: f64,
     ticks: u64,
@@ -101,6 +104,7 @@ impl NoteGame {
         atlases: cjk::CjkAtlases,
         file: PathBuf,
         logical: (u32, u32),
+        note_chrome: bool,
     ) -> Self {
         NoteGame {
             surface,
@@ -117,6 +121,7 @@ impl NoteGame {
             booted: false,
             last_mouse: None,
             guest_menu_open: false,
+            note_chrome,
             scale: 1.0,
             ticks: 0,
             script: Vec::new(),
@@ -129,6 +134,86 @@ impl NoteGame {
 
     fn svc(&self, value: serde_json::Value) {
         self.surface.svc_push(value.to_string());
+    }
+
+    /// Serve the feed demo's mock API over the host svc channel.
+    fn serve_feed(&self, query: &str) {
+        // 读取本地 mock API 并回推 feed 事件
+        let path = std::env::var("POCKETJS_FEED_API").unwrap_or_default();
+        if path.is_empty() {
+            self.svc(serde_json::json!({
+                "t": "feed",
+                "ok": false,
+                "error": "POCKETJS_FEED_API is not set",
+            }));
+            return;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(mut doc) => {
+                    let q = query.trim().to_ascii_uppercase();
+                    if !q.is_empty() {
+                        if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
+                            items.retain(|item| {
+                                item.get("tag")
+                                    .and_then(|t| t.as_str())
+                                    .map(|t| t.eq_ignore_ascii_case(&q))
+                                    .unwrap_or(false)
+                            });
+                        }
+                    }
+                    let count = doc
+                        .get("items")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    let source = doc
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("mock-api")
+                        .to_string();
+                    let fetched_at = chrono_like_now();
+                    self.svc(serde_json::json!({
+                        "t": "feed",
+                        "ok": true,
+                        "items": doc.get("items").cloned().unwrap_or_else(|| serde_json::json!([])),
+                        "fetchedAt": fetched_at,
+                        "source": source,
+                    }));
+                    log::info!("note-widget: served feed q={q:?} items={count} from {path}");
+                }
+                Err(error) => self.svc(serde_json::json!({
+                    "t": "feed",
+                    "ok": false,
+                    "error": format!("invalid feed json: {error}"),
+                })),
+            },
+            Err(error) => self.svc(serde_json::json!({
+                "t": "feed",
+                "ok": false,
+                "error": format!("read {path}: {error}"),
+            })),
+        }
+    }
+
+    /// Tell the mounted framework to resize app + overlay roots.
+    fn call_resize_viewport(&self, w: u32, h: u32) -> Result<()> {
+        // 调用 guest 的 live-viewport hook
+        self.guest.with(|ctx| -> Result<()> {
+            use pocket_mod::qjs::{Function, Value};
+            let globals = ctx.globals();
+            let Ok(hook) = globals.get::<_, Value>("__pocketResizeViewport") else {
+                return Ok(());
+            };
+            if !Function::from_value(hook.clone()).is_ok() {
+                return Ok(());
+            }
+            let hook = Function::from_value(hook)
+                .map_err(|e| anyhow!("__pocketResizeViewport: {e}"))?;
+            hook.call::<_, ()>((w as f64, h as f64))
+                .map_err(|e| anyhow!("__pocketResizeViewport threw: {e}"))?;
+            Ok(())
+        })
     }
 
     /// Rasterize any codepoints `text` needs that the baked atlases lack,
@@ -332,8 +417,10 @@ impl FlatWidget for NoteGame {
             self.exit = true;
         }
 
-        // Window → core viewport. Live resizes relayout the core and tell
-        // the app (which re-wraps against the new width).
+        // Window → core viewport + framework app/overlay roots.
+        // set_viewport alone only resizes the native root; generic apps need
+        // globalThis.__pocketResizeViewport so mount layers follow the window
+        // (otherwise the new area stays uncleared black on opaque demos).
         let logical = (
             ((window_px.0 as f64 / scale).round() as u32).max(1),
             ((window_px.1 as f64 / scale).round() as u32).max(1),
@@ -342,7 +429,9 @@ impl FlatWidget for NoteGame {
             self.logical = logical;
             self.surface
                 .with_ui(|ui| ui.set_viewport(logical.0 as f32, logical.1 as f32));
+            self.call_resize_viewport(logical.0, logical.1)?;
             self.svc(serde_json::json!({"t": "resize", "w": logical.0, "h": logical.1}));
+            self.dirty = true;
         }
 
         // Keyboard / wheel / pointer → svc lines (logical px).
@@ -402,10 +491,18 @@ impl FlatWidget for NoteGame {
             }
         }
 
-        // The guest turn (Law 3: exactly one per tick). Clicks are CIRCLE —
-        // hover already focused what's under the pointer.
+        // The guest turn (Law 3: exactly one per tick). Clicks are CIRCLE.
+        // Pack the real OS pointer as a touch contact so ordinary apps
+        // (without note's svc mouse bridge) resolve hover/focus/onPress via
+        // framework handleFrame's pointer-contact path.
         let buttons = if mouse_down { BTN_CIRCLE } else { 0 };
-        self.guest.frame(buttons)?;
+        if let Some((x, y)) = pos {
+            let packed = pack_pointer_touch(x, y);
+            // 0x8080 = centered analog (spec::ANALOG_CENTER).
+            self.guest.frame_with_touches(buttons, 0x8080, &[packed])?;
+        } else {
+            self.guest.frame(buttons)?;
+        }
         self.surface.tick();
 
         // Guest → host intents.
@@ -416,6 +513,11 @@ impl FlatWidget for NoteGame {
                     Some("quit") => self.exit = true,
                     Some("menu") => self.guest_menu_open = v["open"].as_bool().unwrap_or(false),
                     Some("copy") => clipboard::copy(v["text"].as_str().unwrap_or_default()),
+                    Some("fetch-feed") => {
+                        // Desktop feed demo: host reads the mock API file.
+                        let q = v["q"].as_str().unwrap_or("");
+                        self.serve_feed(q);
+                    }
                     Some("caret") => {
                         self.caret_rect = Some((
                             v["x"].as_f64().unwrap_or(0.0) as f32,
@@ -480,10 +582,9 @@ impl FlatWidget for NoteGame {
     }
 
     fn drag_at(&mut self, cursor: Vec2) -> bool {
-        // The header is the move handle, minus the buttons on its right.
-        // While the guest's menu is up, nothing is a drag region — clicks
-        // must reach the backdrop so it can close.
-        if self.guest_menu_open {
+        // Decorated desktop demos leave move/resize to the OS title bar and
+        // edges. Only the borderless note sticky needs an in-content handle.
+        if !self.note_chrome || self.guest_menu_open {
             return false;
         }
         let (x, y) = (cursor.x / self.scale as f32, cursor.y / self.scale as f32);
@@ -491,7 +592,8 @@ impl FlatWidget for NoteGame {
     }
 
     fn resize_at(&mut self, cursor: Vec2) -> bool {
-        if self.guest_menu_open {
+        // Same split: OS edges for decorated demos; grip only for note.
+        if !self.note_chrome || self.guest_menu_open {
             return false;
         }
         let (x, y) = (cursor.x / self.scale as f32, cursor.y / self.scale as f32);
@@ -506,6 +608,28 @@ impl FlatWidget for NoteGame {
     fn wants_exit(&self) -> bool {
         self.exit
     }
+}
+
+/// Pack a logical pointer as the wide touch wire form (framework/src/touch.ts).
+fn pack_pointer_touch(x: f32, y: f32) -> u32 {
+    // 宽坐标触点打包
+    const WIDE_MARKER: u32 = 0x8000_0000;
+    const COORD_BITS: u32 = 10;
+    const COORD_MASK: u32 = (1 << COORD_BITS) - 1;
+    let x = x.round().clamp(0.0, COORD_MASK as f32) as u32;
+    let y = y.round().clamp(0.0, COORD_MASK as f32) as u32;
+    WIDE_MARKER | (y << COORD_BITS) | x
+}
+
+/// 生成简易时间戳字符串。
+fn chrono_like_now() -> String {
+    // 不用额外时间 crate，wall-clock 秒足够 demo
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("unix:{secs}")
 }
 
 /// FNV-1a 64 over the DrawList words (embed.rs's dirty signal).
@@ -747,17 +871,44 @@ fn main() -> Result<()> {
     let atlases = cjk::CjkAtlases::from_pak(&std::fs::read(
         resolve_asset(args.pak.clone(), &args.app, "pak")?,
     )?);
-    let mut game = NoteGame::new(surface, guest, atlases, note_file(args.file.clone()), args.size);
+    let note_chrome = args.app == "note-main" || args.app == "note";
+    let mut game = NoteGame::new(
+        surface,
+        guest,
+        atlases,
+        note_file(args.file.clone()),
+        args.size,
+        note_chrome,
+    );
     game.script = std::mem::take(&mut args.script);
     game.quit_after = args.auto_quit.map(|s| (s * 60.0) as u64);
 
     if let Some(out) = args.screenshot.clone() {
         headless(game, args, &out)
-    } else {
+    } else if note_chrome {
+        // Pocket Note: ambient sticky — borderless, transparent, always-on-top.
         pocket_widget::run_flat(
             WidgetConfig {
                 title: "Pocket Note".into(),
                 size: args.size,
+                resizable: true,
+                min_size: (240, 180),
+                ime: true,
+                ..Default::default()
+            },
+            game,
+        )
+    } else {
+        // Generic desktop demos (windows-widget counter, …): ordinary OS
+        // window chrome so drag/resize match platform apps (title bar +
+        // edges), not a custom borderless grip.
+        pocket_widget::run_flat(
+            WidgetConfig {
+                title: "Pocket Desktop".into(),
+                size: args.size,
+                transparent: false,
+                decorations: true,
+                always_on_top: false,
                 resizable: true,
                 min_size: (240, 180),
                 ime: true,
