@@ -131,20 +131,23 @@ one `render_words_scaled` pass on dirty frames. It exercises everything the
   registered capability ids name it (`input.text`, `input.pointer`,
   `input.ime`, `host.clipboard`, `display.viewport.live`,
   `text.glyphs.runtime` — each a distinct observable guarantee; a real
-  pointer is NOT `input.cursor`), and a `macos-widget` target
-  profile (hostAbi 3, density 2, `dynamicViewport` range) provides them.
-  Target semantics live in queryable profile FIELDS (`platform`,
-  `form` — takeover/window/widget/kiosk/embedded); ids are labels
-  (convention `<platform>-<form>`, future: `macos-app`, `linux-kiosk`),
-  and apps declare viewport intent per policy (`fixed`/`dynamic`
-  variants), not per target. Pocket Note currently declares only a dynamic
-  variant and is therefore intentionally admitted by `macos-widget`, not by
-  PSP/Vita or an embedded Stage screen. Its desktop-only APIs sit in
-  `enhances`; if the app later adds a fixed variant, the same source can
-  degrade to a read-only note on hosts without those features. Native hosts
-  assert identity (`__host`/`__hostAbi` vs the plan's target), and
-  `bun run note` builds through the manifest — density and features come from
-  the profile, not flags.
+  pointer is NOT `input.cursor`), and sibling desktop-widget target
+  profiles `macos-widget` / `windows-widget` (hostAbi 3, density 2,
+  `dynamicViewport` range; same capability contract, different `platform`)
+  provide them. Target semantics live in queryable profile FIELDS
+  (`platform`, `form` — takeover/window/widget/kiosk/embedded); ids are
+  labels (convention `<platform>-<form>`, future: `macos-app`,
+  `linux-kiosk`), and apps declare viewport intent per policy
+  (`fixed`/`dynamic` variants), not per target. Pocket Note currently
+  declares only a dynamic variant and is therefore intentionally admitted
+  by either desktop-widget stock host, not by PSP/Vita or an embedded Stage
+  screen. Its desktop-only APIs sit in `enhances`; if the app later adds a
+  fixed variant, the same source can degrade to a read-only note on hosts
+  without those features. Native hosts assert identity (`__host`/`__hostAbi`
+  vs the plan's target), and `bun run note` builds through the manifest
+  against the host OS's stock target (`macos-widget` on macOS,
+  `windows-widget` on Windows) — density and features come from the profile,
+  not flags.
 - **Clicks are CIRCLE.** The host synthesizes the spec press button while
   the mouse is down; the app resolves hover → focus (`hitFocusable` +
   `focusNode`) from svc mouse moves, and the framework's stock onPress

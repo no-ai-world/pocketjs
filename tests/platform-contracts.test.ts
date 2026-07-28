@@ -141,7 +141,13 @@ describe("pocket.json v2 schema", () => {
 
 describe("platform registry", () => {
   test("production advertises only the truthful stock-host profiles", () => {
-    expect(Object.keys(POCKET_TARGETS)).toEqual(["psp", "vita", "pocketbook", "macos-widget"]);
+    expect(Object.keys(POCKET_TARGETS)).toEqual([
+      "psp",
+      "vita",
+      "pocketbook",
+      "macos-widget",
+      "windows-widget",
+    ]);
     expect(validatePlatformContractRegistry(POCKET_PLATFORM_CONTRACTS)).toEqual([]);
     expect(POCKET_TARGETS.psp.capabilities).toEqual([
       "input.analog.left",
@@ -176,9 +182,10 @@ describe("platform registry", () => {
       presentations: ["integer-fit"],
       rasterDensity: 2,
     });
-    // The desktop widget target: dynamic viewport, real pointer/text/IME,
+    // Desktop widget stock hosts: dynamic viewport, real pointer/text/IME,
     // runtime glyph baking — and honestly NO nub or synthesized cursor.
-    expect(POCKET_TARGETS["macos-widget"].capabilities).toEqual([
+    // macos-widget and windows-widget share one capability/display contract.
+    const desktopWidgetCapabilities = [
       "input.buttons",
       "input.ime",
       "input.pointer",
@@ -187,11 +194,14 @@ describe("platform registry", () => {
       "display.viewport.live",
       "text.glyphs.baked",
       "text.glyphs.runtime",
-    ]);
-    expect(POCKET_TARGETS["macos-widget"].display.dynamicViewport).toEqual({
-      min: [240, 180],
-      max: [4096, 4096],
-    });
+    ] as const;
+    const desktopWidgetViewport = { min: [240, 180], max: [4096, 4096] } as const;
+    expect(POCKET_TARGETS["macos-widget"].capabilities).toEqual([...desktopWidgetCapabilities]);
+    expect(POCKET_TARGETS["windows-widget"].capabilities).toEqual([...desktopWidgetCapabilities]);
+    expect(POCKET_TARGETS["macos-widget"].display.dynamicViewport).toEqual(desktopWidgetViewport);
+    expect(POCKET_TARGETS["windows-widget"].display.dynamicViewport).toEqual(desktopWidgetViewport);
+    expect(POCKET_TARGETS["macos-widget"].hostAbi).toBe(3);
+    expect(POCKET_TARGETS["windows-widget"].hostAbi).toBe(3);
   });
 
   test("TargetId and capability registries extend without changing the resolver", () => {
@@ -284,19 +294,21 @@ describe("semantic resolution", () => {
 
   test("resolves the note's dynamic manifest and an explicit fixed variant", async () => {
     const manifest = await Bun.file(new URL("../apps/note/pocket.json", import.meta.url)).json();
-    const result = validateAndResolveBuildPlan(manifest, { target: "macos-widget" });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.plan.target).toEqual({ id: "macos-widget", hostAbi: 3 });
-    // Dynamic-viewport native presentation: density from the profile.
-    expect(result.plan.viewport.rasterDensity).toBe(2);
-    expect(result.plan.viewport.logical).toEqual([420, 560]);
-    // requires are on; enhances resolve to available on this target.
-    expect(result.plan.features["input.text"]).toBe(true);
-    expect(result.plan.features["input.ime"]).toBe(true);
-    expect(result.plan.features["host.clipboard"]).toBe(true);
-    expect(result.plan.features["display.viewport.live"]).toBe(true);
-    expect(result.plan.features["text.glyphs.runtime"]).toBe(true);
+    for (const target of ["macos-widget", "windows-widget"] as const) {
+      const result = validateAndResolveBuildPlan(manifest, { target });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.plan.target).toEqual({ id: target, hostAbi: 3 });
+      // Dynamic-viewport native presentation: density from the profile.
+      expect(result.plan.viewport.rasterDensity).toBe(2);
+      expect(result.plan.viewport.logical).toEqual([420, 560]);
+      // requires are on; enhances resolve to available on this target.
+      expect(result.plan.features["input.text"]).toBe(true);
+      expect(result.plan.features["input.ime"]).toBe(true);
+      expect(result.plan.features["host.clipboard"]).toBe(true);
+      expect(result.plan.features["display.viewport.live"]).toBe(true);
+      expect(result.plan.features["text.glyphs.runtime"]).toBe(true);
+    }
 
     // The source has a read-only fallback, but its current dynamic-only
     // manifest does not admit on PSP. Adding an explicit fixed variant makes
@@ -313,48 +325,50 @@ describe("semantic resolution", () => {
 
   test("dynamic viewport admits in-range sizes and rejects out-of-range", async () => {
     const manifest = await Bun.file(new URL("../apps/note/pocket.json", import.meta.url)).json();
-    const tiny = structuredClone(manifest) as any;
-    tiny.app.viewport.dynamic.default = [100, 100];
-    const rejected = validateAndResolveBuildPlan(tiny, { target: "macos-widget" });
-    expect(rejected.ok).toBe(false);
-    if (rejected.ok) return;
-    expect(rejected.diagnostics.map((d) => d.code)).toContain("viewport.logicalUnsupported");
+    for (const target of ["macos-widget", "windows-widget"] as const) {
+      const tiny = structuredClone(manifest) as any;
+      tiny.app.viewport.dynamic.default = [100, 100];
+      const rejected = validateAndResolveBuildPlan(tiny, { target });
+      expect(rejected.ok).toBe(false);
+      if (rejected.ok) return;
+      expect(rejected.diagnostics.map((d) => d.code)).toContain("viewport.logicalUnsupported");
 
-    const roomy = structuredClone(manifest) as any;
-    roomy.app.viewport.dynamic.default = [800, 600];
-    expect(validateAndResolveBuildPlan(roomy, { target: "macos-widget" }).ok).toBe(true);
+      const roomy = structuredClone(manifest) as any;
+      roomy.app.viewport.dynamic.default = [800, 600];
+      expect(validateAndResolveBuildPlan(roomy, { target }).ok).toBe(true);
+    }
   });
 
   test("every committed demo manifest lands on the expected admission matrix", async () => {
     const { readdirSync, existsSync } = await import("node:fs");
-    // demo -> [psp, vita, macos-widget] admission. Fixed-only console demos
-    // stay off the desktop widget (its profile presents "native" over a
-    // dynamic viewport, not the console integer-fit contract); Hero declares
-    // both policies, while the note is dynamic-only. A new demo missing here
-    // fails the test on purpose.
-    const expected: Record<string, [boolean, boolean, boolean]> = {
-      cafe: [true, true, false],
-      cards: [true, true, false],
-      chrome: [true, true, false],
-      cursor: [true, true, false],
-      gallery: [true, true, false],
-      hero: [true, true, true],
-      "hero-vue-sfc": [true, true, false],
-      "hero-vue-vapor": [true, true, false],
-      im: [true, true, false],
-      "ipod-nano": [false, false, false], // admitted by the package-shaped macos-embedded target
-      launcher: [true, true, false], // the Cover Flow deck (docs/LAUNCHER.md) is an ordinary console app
-      library: [true, true, false],
-      motions: [true, true, false],
-      music: [true, true, false],
-      note: [false, false, true],
-      notifications: [true, true, false],
-      settings: [true, true, false],
-      stats: [true, true, false],
-      "vue-sfc-lab": [true, true, false],
-      zoomlab: [true, true, false],
+    // demo -> [psp, vita, macos-widget, windows-widget] admission. Fixed-only
+    // console demos stay off desktop widgets (native + dynamic viewport, not
+    // the console integer-fit contract); Hero declares both policies, while
+    // the note is dynamic-only. Sibling desktop widget targets share one
+    // admission column pair. A new demo missing here fails on purpose.
+    const expected: Record<string, [boolean, boolean, boolean, boolean]> = {
+      cafe: [true, true, false, false],
+      cards: [true, true, false, false],
+      chrome: [true, true, false, false],
+      cursor: [true, true, false, false],
+      gallery: [true, true, false, false],
+      hero: [true, true, true, true],
+      "hero-vue-sfc": [true, true, false, false],
+      "hero-vue-vapor": [true, true, false, false],
+      im: [true, true, false, false],
+      "ipod-nano": [false, false, false, false], // admitted by the package-shaped macos-embedded target
+      launcher: [true, true, false, false], // the Cover Flow deck (docs/LAUNCHER.md) is an ordinary console app
+      library: [true, true, false, false],
+      motions: [true, true, false, false],
+      music: [true, true, false, false],
+      note: [false, false, true, true],
+      notifications: [true, true, false, false],
+      settings: [true, true, false, false],
+      stats: [true, true, false, false],
+      "vue-sfc-lab": [true, true, false, false],
+      zoomlab: [true, true, false, false],
     };
-    const targets = ["psp", "vita", "macos-widget"] as const;
+    const targets = ["psp", "vita", "macos-widget", "windows-widget"] as const;
     for (const demo of readdirSync(new URL("../apps/", import.meta.url)).sort()) {
       const url = new URL(`../apps/${demo}/pocket.json`, import.meta.url);
       if (!existsSync(url)) continue;
@@ -388,10 +402,12 @@ describe("semantic resolution", () => {
   test("widget form does not host fixed-viewport apps (acceptsFixed off)", () => {
     const fixedOnly = structuredClone(portableInput) as any;
     fixedOnly.engine.capabilities.requires = ["text.glyphs.baked", "input.buttons"];
-    const result = validateAndResolveBuildPlan(fixedOnly, { target: "macos-widget" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.diagnostics.map((d) => d.code)).toContain("viewport.fixedUnhosted");
+    for (const target of ["macos-widget", "windows-widget"] as const) {
+      const result = validateAndResolveBuildPlan(fixedOnly, { target });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.diagnostics.map((d) => d.code)).toContain("viewport.fixedUnhosted");
+    }
   });
 
   test("diagnostics point into an explicit fixed viewport variant", () => {
@@ -416,6 +432,8 @@ describe("semantic resolution", () => {
     expect(POCKET_TARGETS.vita.form).toBe("takeover");
     expect(POCKET_TARGETS["macos-widget"].platform).toBe("macos");
     expect(POCKET_TARGETS["macos-widget"].form).toBe("widget");
+    expect(POCKET_TARGETS["windows-widget"].platform).toBe("windows");
+    expect(POCKET_TARGETS["windows-widget"].form).toBe("widget");
   });
 
   test("stock-demo builds prefer the demo's own manifest over synthesis", async () => {

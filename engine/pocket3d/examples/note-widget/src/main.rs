@@ -19,6 +19,7 @@
 //! drag the dotted corner (or any edge, macOS) to resize, ⌘Q/⌘W quits.
 
 mod cjk;
+mod clipboard;
 
 use std::path::{Path, PathBuf};
 
@@ -319,7 +320,7 @@ impl FlatWidget for NoteGame {
         }
         if input.super_down()
             && input.key_pressed(KeyCode::KeyV)
-            && let Some(text) = clipboard_paste()
+            && let Some(text) = clipboard::paste()
             && !text.is_empty()
         {
             self.ensure_text(&text);
@@ -414,7 +415,7 @@ impl FlatWidget for NoteGame {
                     Some("save") => self.save(v["text"].as_str().unwrap_or_default()),
                     Some("quit") => self.exit = true,
                     Some("menu") => self.guest_menu_open = v["open"].as_bool().unwrap_or(false),
-                    Some("copy") => clipboard_copy(v["text"].as_str().unwrap_or_default()),
+                    Some("copy") => clipboard::copy(v["text"].as_str().unwrap_or_default()),
                     Some("caret") => {
                         self.caret_rect = Some((
                             v["x"].as_f64().unwrap_or(0.0) as f32,
@@ -507,51 +508,6 @@ impl FlatWidget for NoteGame {
     }
 }
 
-/// Put text on the system clipboard. pbcopy is the zero-dependency macOS
-/// road; other platforms just log (the widget shell is macOS-first).
-fn clipboard_copy(text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-        let child = Command::new("pbcopy").stdin(Stdio::piped()).spawn();
-        match child {
-            Ok(mut child) => {
-                if let Some(stdin) = child.stdin.as_mut() {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-                let _ = child.wait();
-                log::info!("note-widget: copied {} bytes", text.len());
-            }
-            Err(e) => log::warn!("note-widget: pbcopy failed: {e}"),
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    log::warn!("note-widget: clipboard copy unsupported on this platform");
-}
-
-/// Read the system clipboard (pbpaste — the macOS counterpart of copy).
-fn clipboard_paste() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        match std::process::Command::new("pbpaste").output() {
-            Ok(out) => Some(String::from_utf8_lossy(&out.stdout).into_owned()),
-            Err(e) => {
-                log::warn!("note-widget: pbpaste failed: {e}");
-                None
-            }
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        log::warn!("note-widget: clipboard paste unsupported on this platform");
-        None
-    }
-}
-
 /// FNV-1a 64 over the DrawList words (embed.rs's dirty signal).
 fn fnv1a64(words: &[u32]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -575,6 +531,8 @@ struct Args {
     file: Option<PathBuf>,
     size: (u32, u32),
     density: u32,
+    /// Optional override for ui.__host (macos-widget|windows-widget).
+    host: Option<String>,
     screenshot: Option<PathBuf>,
     frames: u64,
     script: Vec<(u64, ScriptEvent)>,
@@ -589,6 +547,7 @@ fn parse_args() -> Result<Args> {
         file: None,
         size: (420, 560),
         density: 2,
+        host: None,
         screenshot: None,
         frames: 40,
         script: Vec::new(),
@@ -614,6 +573,7 @@ fn parse_args() -> Result<Args> {
             "--width" => args.size.0 = val("--width")?.parse()?,
             "--height" => args.size.1 = val("--height")?.parse()?,
             "--density" => args.density = val("--density")?.parse()?,
+            "--host" => args.host = Some(val("--host")?),
             "--screenshot" => args.screenshot = Some(PathBuf::from(val("--screenshot")?)),
             "--frames" => args.frames = val("--frames")?.parse()?,
             "--click" => {
@@ -719,13 +679,43 @@ fn resolve_asset(explicit: Option<PathBuf>, app: &str, ext: &str) -> Result<Path
 
 fn note_file(explicit: Option<PathBuf>) -> PathBuf {
     explicit.unwrap_or_else(|| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".into());
         Path::new(&home).join(".pocket-note.md")
     })
 }
 
+/// 解析本进程应发布的 desktop-widget 契约身份。
+fn host_identity(explicit: Option<&str>) -> Result<(&'static str, u32)> {
+    // 显式覆盖优先（工具链/测试可注入）
+    let raw = explicit
+        .map(str::to_owned)
+        .or_else(|| std::env::var("POCKETJS_HOST").ok())
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "windows") {
+                "windows-widget".into()
+            } else if cfg!(target_os = "macos") {
+                "macos-widget".into()
+            } else {
+                // Desktop widget stock hosts are macOS + Windows today.
+                "macos-widget".into()
+            }
+        });
+    match raw.as_str() {
+        "macos-widget" => Ok(("macos-widget", 3)),
+        "windows-widget" => Ok(("windows-widget", 3)),
+        other => Err(anyhow!(
+            "unsupported desktop-widget host id '{other}' (expected macos-widget|windows-widget)"
+        )),
+    }
+}
+
 /// Boot the guest: feed the pak, mount `ui` (svc included), eval the bundle.
 fn boot(args: &Args) -> Result<(Guest, UiSurface)> {
+    // Plan-built bundles assert ui.__host/__hostAbi against the selected
+    // desktop-widget stock target (macos-widget | windows-widget).
+    let (host_id, host_abi) = host_identity(args.host.as_deref())?;
     let js_path = resolve_asset(args.js.clone(), &args.app, "js")?;
     let pak_path = resolve_asset(args.pak.clone(), &args.app, "pak")?;
     let bundle = std::fs::read_to_string(&js_path)
@@ -737,9 +727,7 @@ fn boot(args: &Args) -> Result<(Guest, UiSurface)> {
         (args.size.0 as f32, args.size.1 as f32),
         args.density,
     );
-    // The platform-contract identity plan-built bundles assert
-    // (contracts/spec/platforms.ts POCKET_TARGETS["macos-widget"]).
-    surface.set_identity("macos-widget", 3);
+    surface.set_identity(host_id, host_abi);
     surface.feed_pak(&pak);
     let guest = Guest::new()?;
     surface.mount(&guest)?;

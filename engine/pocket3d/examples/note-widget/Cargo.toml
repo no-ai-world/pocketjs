@@ -20,3 +20,4 @@ env_logger = { workspace = true }
 serde_json = { workspace = true }
 ab_glyph = { workspace = true }
 memmap2 = { workspace = true }
+arboard = { workspace = true }

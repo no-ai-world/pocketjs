@@ -164,6 +164,7 @@ export const POCKET_TARGETS = defineTargetRegistry<PocketCapabilityId, {
   readonly vita: TargetProfile<PocketCapabilityId>;
   readonly pocketbook: TargetProfile<PocketCapabilityId>;
   readonly "macos-widget": TargetProfile<PocketCapabilityId>;
+  readonly "windows-widget": TargetProfile<PocketCapabilityId>;
 }>({
   psp: {
     hostAbi: 1,
@@ -229,9 +230,33 @@ export const POCKET_TARGETS = defineTargetRegistry<PocketCapabilityId, {
   // pointer is real, text comes from the keyboard/IME, and unseen glyphs
   // bake at runtime. A widget shell is not a general app frame, so it does
   // not accept fixed-viewport apps (a future macos-app target would).
+  // macos-widget and windows-widget are sibling stock hosts: same form,
+  // hostAbi, display policy and capability contract; only platform differs.
   "macos-widget": {
     hostAbi: 3,
     platform: "macos",
+    form: "widget",
+    display: {
+      physicalViewport: [840, 1120],
+      logicalViewports: [[420, 560]],
+      dynamicViewport: { min: [240, 180], max: [4096, 4096] },
+      presentations: ["native"],
+      rasterDensity: 2,
+    },
+    capabilities: [
+      "input.buttons",
+      "input.ime",
+      "input.pointer",
+      "input.text",
+      "host.clipboard",
+      "display.viewport.live",
+      "text.glyphs.baked",
+      "text.glyphs.runtime",
+    ],
+  },
+  "windows-widget": {
+    hostAbi: 3,
+    platform: "windows",
     form: "widget",
     display: {
       physicalViewport: [840, 1120],
