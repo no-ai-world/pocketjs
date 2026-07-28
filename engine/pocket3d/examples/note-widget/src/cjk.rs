@@ -342,7 +342,7 @@ impl CjkAtlases {
         }
     }
 
-    /// 首次需要非 ASCII 字形时再打开系统字体。
+    /// Open the system CJK face on first non-ASCII ensure.
     fn resolve_source(&mut self) {
         if self.source_resolved {
             return;

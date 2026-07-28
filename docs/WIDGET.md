@@ -249,6 +249,9 @@ to implement:
 - The windowed shell explicitly requests wgpu's `LowPower` adapter. On Apple
   Silicon that remains Metal on the integrated Apple GPU; headless tooling and
   full-screen game hosts keep the existing `HighPerformance` default.
+- Optional measurement override: `POCKETJS_WIDGET_ADAPTER=auto|cpu|integrated|discrete`
+  (aliases: `warp`, `igpu`, `dgpu`). Only consulted on the LowPower widget path;
+  forced classes refuse silent fallback when no surface-capable match exists.
 - **Measured receipt (M3 Max, 10 s, release build).** The static settings app
   ran 601 guest ticks but presented only 2 GPU frames (0.3%); the hero app,
   whose spinner keeps changing, presented 224 (37.3%). Total process CPU time

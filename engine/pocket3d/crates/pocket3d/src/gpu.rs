@@ -61,7 +61,7 @@ impl Gpu {
     /// Instance for ambient/desktop widgets: native backend only so Windows
     /// does not pay to probe every GPU API at startup.
     pub fn new_instance_for_widgets() -> wgpu::Instance {
-        // 桌面 widget 只枚举本机主后端
+        // Enumerate only the host's primary backend for desktop widgets.
         wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: widget_backends(),
             ..wgpu::InstanceDescriptor::default()
@@ -154,7 +154,7 @@ enum WidgetAdapterForce {
 }
 
 fn widget_adapter_force() -> WidgetAdapterForce {
-    // 解析 POCKETJS_WIDGET_ADAPTER；未知值告警后按 auto
+    // Parse POCKETJS_WIDGET_ADAPTER; unknown values warn and fall back to auto.
     let raw = std::env::var("POCKETJS_WIDGET_ADAPTER")
         .unwrap_or_default()
         .to_ascii_lowercase();
@@ -173,7 +173,7 @@ fn widget_adapter_force() -> WidgetAdapterForce {
 }
 
 fn adapter_matches_force(adapter: &wgpu::Adapter, force: &WidgetAdapterForce) -> bool {
-    // 是否满足测量强制类型
+    // Whether this adapter matches a measurement force class.
     match force {
         WidgetAdapterForce::Auto => true,
         WidgetAdapterForce::Cpu => adapter.get_info().device_type == wgpu::DeviceType::Cpu,
@@ -268,7 +268,7 @@ async fn pick_adapter(
 
 /// Backends for widget hosts: one native API, not every available stack.
 fn widget_backends() -> wgpu::Backends {
-    // 按 OS 选择单一主后端，降低启动枚举成本
+    // One native backend per OS to cut startup enumeration cost.
     #[cfg(target_os = "windows")]
     {
         wgpu::Backends::DX12
@@ -285,11 +285,12 @@ fn widget_backends() -> wgpu::Backends {
 
 /// Modest 2D-UI limits for ambient widget hosts.
 fn widget_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
-    // 收紧 widget 设备上限（2D UI，不是 3D 场景）
+    // Keep 2D-UI device caps modest; leave texture dims high enough for
+    // density-2 CJK font atlases (large text slots can exceed 4096 px).
     let supported = adapter.limits();
     let mut limits = wgpu::Limits::downlevel_defaults();
-    limits.max_texture_dimension_2d = supported.max_texture_dimension_2d.min(4096);
-    limits.max_texture_dimension_1d = supported.max_texture_dimension_1d.min(4096);
+    limits.max_texture_dimension_2d = supported.max_texture_dimension_2d.min(8192);
+    limits.max_texture_dimension_1d = supported.max_texture_dimension_1d.min(8192);
     limits.max_buffer_size = supported.max_buffer_size.min(64 * 1024 * 1024);
     limits.max_storage_buffer_binding_size =
         supported.max_storage_buffer_binding_size.min(16 * 1024 * 1024);
