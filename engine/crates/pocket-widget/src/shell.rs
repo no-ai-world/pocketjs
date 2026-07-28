@@ -412,7 +412,7 @@ impl<D: Driver> WidgetApp<D> {
         if self.config.ime {
             window.set_ime_allowed(true);
         }
-        let instance = Gpu::new_instance();
+        let instance = Gpu::new_instance_for_widgets();
         let surface = instance.create_surface(window.clone())?;
         let gpu = Gpu::from_instance_for_surface_with_power_preference(
             instance,
@@ -424,6 +424,9 @@ impl<D: Driver> WidgetApp<D> {
         let mut surface_config = surface
             .get_default_config(&gpu.adapter, px.width.max(1), px.height.max(1))
             .ok_or_else(|| anyhow::anyhow!("surface not supported by adapter"))?;
+        // Demand-rendered widgets rarely present; keep a single buffered frame
+        // of latency so DX12 does not retain multi-frame swapchain images.
+        surface_config.desired_maximum_frame_latency = 1;
         surface_config.present_mode = wgpu::PresentMode::AutoVsync;
         if self.config.transparent {
             // Windows DX12 swapchains often only advertise Opaque. Prefer a

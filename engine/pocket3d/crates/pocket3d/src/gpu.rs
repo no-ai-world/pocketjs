@@ -58,6 +58,16 @@ impl Gpu {
         wgpu::Instance::new(&wgpu::InstanceDescriptor::default())
     }
 
+    /// Instance for ambient/desktop widgets: native backend only so Windows
+    /// does not pay to probe every GPU API at startup.
+    pub fn new_instance_for_widgets() -> wgpu::Instance {
+        // 桌面 widget 只枚举本机主后端
+        wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: widget_backends(),
+            ..wgpu::InstanceDescriptor::default()
+        })
+    }
+
     /// Finish initialization from an existing instance + surface.
     pub fn from_instance_for_surface(
         instance: wgpu::Instance,
@@ -134,32 +144,118 @@ impl Gpu {
     }
 }
 
+/// Widget-only adapter override from env (`Auto` = ranked iGPU→dGPU→…).
+/// Only consulted on LowPower (ambient widget) paths — never games/headless.
+enum WidgetAdapterForce {
+    Auto,
+    Cpu,
+    Integrated,
+    Discrete,
+}
+
+fn widget_adapter_force() -> WidgetAdapterForce {
+    // 解析 POCKETJS_WIDGET_ADAPTER；未知值告警后按 auto
+    let raw = std::env::var("POCKETJS_WIDGET_ADAPTER")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match raw.as_str() {
+        "" | "auto" => WidgetAdapterForce::Auto,
+        "cpu" | "warp" => WidgetAdapterForce::Cpu,
+        "integrated" | "igpu" => WidgetAdapterForce::Integrated,
+        "discrete" | "dgpu" => WidgetAdapterForce::Discrete,
+        other => {
+            log::warn!(
+                "POCKETJS_WIDGET_ADAPTER='{other}' unknown (expected auto|cpu|integrated|discrete); using auto"
+            );
+            WidgetAdapterForce::Auto
+        }
+    }
+}
+
+fn adapter_matches_force(adapter: &wgpu::Adapter, force: &WidgetAdapterForce) -> bool {
+    // 是否满足测量强制类型
+    match force {
+        WidgetAdapterForce::Auto => true,
+        WidgetAdapterForce::Cpu => adapter.get_info().device_type == wgpu::DeviceType::Cpu,
+        WidgetAdapterForce::Integrated => {
+            adapter.get_info().device_type == wgpu::DeviceType::IntegratedGpu
+        }
+        WidgetAdapterForce::Discrete => {
+            adapter.get_info().device_type == wgpu::DeviceType::DiscreteGpu
+        }
+    }
+}
+
 /// Pick an adapter honoring power preference more strictly than wgpu's default.
 async fn pick_adapter(
     instance: &wgpu::Instance,
     compatible_surface: Option<&wgpu::Surface<'_>>,
     power_preference: wgpu::PowerPreference,
 ) -> Option<wgpu::Adapter> {
-    // 按功耗偏好选择适配器
-    if power_preference == wgpu::PowerPreference::LowPower {
-        let mut adapters = instance.enumerate_adapters(wgpu::Backends::all());
-        // Prefer iGPU for ambient widgets; fall back to dGPU before WARP/CPU.
-        adapters.sort_by_key(|adapter| match adapter.get_info().device_type {
-            wgpu::DeviceType::IntegratedGpu => 0u8,
-            wgpu::DeviceType::DiscreteGpu => 1,
-            wgpu::DeviceType::VirtualGpu => 2,
-            wgpu::DeviceType::Other => 3,
-            wgpu::DeviceType::Cpu => 4,
-        });
-        for adapter in adapters {
-            if let Some(surface) = compatible_surface
-                && !adapter.is_surface_supported(surface)
-            {
-                continue;
+    // HighPerformance / headless: stock wgpu path only — no widget env overrides.
+    if power_preference != wgpu::PowerPreference::LowPower {
+        return instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference,
+                compatible_surface,
+                force_fallback_adapter: false,
+            })
+            .await
+            .ok();
+    }
+
+    // Ambient widgets: rank iGPU > dGPU > … and honor optional measure override.
+    let force = widget_adapter_force();
+    let force_active = !matches!(force, WidgetAdapterForce::Auto);
+    // Instance is usually already backend-filtered via new_instance_for_widgets.
+    let mut adapters: Vec<wgpu::Adapter> = instance.enumerate_adapters(widget_backends());
+    // Detail logs only when useful: measure force (info) or RUST_LOG=debug.
+    if force_active || log::log_enabled!(log::Level::Debug) {
+        for adapter in &adapters {
+            let info = adapter.get_info();
+            if force_active {
+                log::info!(
+                    "gpu candidate: {:?} ({:?}, {:?})",
+                    info.name,
+                    info.device_type,
+                    info.backend
+                );
+            } else {
+                log::debug!(
+                    "gpu candidate: {:?} ({:?}, {:?})",
+                    info.name,
+                    info.device_type,
+                    info.backend
+                );
             }
-            return Some(adapter);
         }
     }
+    adapters.sort_by_key(|adapter| match adapter.get_info().device_type {
+        wgpu::DeviceType::IntegratedGpu => 0u8,
+        wgpu::DeviceType::DiscreteGpu => 1,
+        wgpu::DeviceType::VirtualGpu => 2,
+        wgpu::DeviceType::Other => 3,
+        wgpu::DeviceType::Cpu => 4,
+    });
+    for adapter in adapters {
+        if !adapter_matches_force(&adapter, &force) {
+            continue;
+        }
+        if let Some(surface) = compatible_surface
+            && !adapter.is_surface_supported(surface)
+        {
+            continue;
+        }
+        return Some(adapter);
+    }
+    if force_active {
+        // Measure runs must not silently fall back to a different class.
+        log::error!(
+            "POCKETJS_WIDGET_ADAPTER force matched no surface-capable adapter; refusing fallback"
+        );
+        return None;
+    }
+    // enumerate returned nothing surface-capable; last-resort wgpu default.
     instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference,
@@ -170,16 +266,35 @@ async fn pick_adapter(
         .ok()
 }
 
+/// Backends for widget hosts: one native API, not every available stack.
+fn widget_backends() -> wgpu::Backends {
+    // 按 OS 选择单一主后端，降低启动枚举成本
+    #[cfg(target_os = "windows")]
+    {
+        wgpu::Backends::DX12
+    }
+    #[cfg(target_os = "macos")]
+    {
+        wgpu::Backends::METAL
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        wgpu::Backends::PRIMARY
+    }
+}
+
 /// Modest 2D-UI limits for ambient widget hosts.
 fn widget_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
-    // 收紧 widget 设备上限
+    // 收紧 widget 设备上限（2D UI，不是 3D 场景）
     let supported = adapter.limits();
     let mut limits = wgpu::Limits::downlevel_defaults();
-    limits.max_texture_dimension_2d = supported.max_texture_dimension_2d.min(8192);
-    limits.max_texture_dimension_1d = supported.max_texture_dimension_1d.min(8192);
-    limits.max_buffer_size = supported.max_buffer_size.min(256 * 1024 * 1024);
+    limits.max_texture_dimension_2d = supported.max_texture_dimension_2d.min(4096);
+    limits.max_texture_dimension_1d = supported.max_texture_dimension_1d.min(4096);
+    limits.max_buffer_size = supported.max_buffer_size.min(64 * 1024 * 1024);
     limits.max_storage_buffer_binding_size =
-        supported.max_storage_buffer_binding_size.min(128 * 1024 * 1024);
+        supported.max_storage_buffer_binding_size.min(16 * 1024 * 1024);
+    limits.max_uniform_buffer_binding_size =
+        supported.max_uniform_buffer_binding_size.min(64 * 1024);
     limits
 }
 

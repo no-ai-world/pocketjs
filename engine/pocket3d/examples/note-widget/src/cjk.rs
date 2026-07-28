@@ -322,7 +322,9 @@ impl SlotAtlas {
 
 /// All of a pak's font slots + the system fallback face.
 pub struct CjkAtlases {
+    /// Lazily opened on first non-ASCII ensure — Latin-only apps skip mmap.
     source: Option<GlyphSource>,
+    source_resolved: bool,
     slots: Vec<SlotAtlas>,
 }
 
@@ -333,17 +335,31 @@ impl CjkAtlases {
             .filter(|e| e.key.starts_with("ui:font."))
             .filter_map(|e| SlotAtlas::parse(e.blob))
             .collect();
-        let source = match GlyphSource::find() {
+        CjkAtlases {
+            source: None,
+            source_resolved: false,
+            slots,
+        }
+    }
+
+    /// 首次需要非 ASCII 字形时再打开系统字体。
+    fn resolve_source(&mut self) {
+        if self.source_resolved {
+            return;
+        }
+        self.source_resolved = true;
+        self.source = match GlyphSource::find() {
             Some((source, name)) => {
                 log::info!("note-widget: CJK fallback font {name}");
                 Some(source)
             }
             None => {
-                log::warn!("note-widget: no CJK-capable system font found — non-Latin input will tofu");
+                log::warn!(
+                    "note-widget: no CJK-capable system font found — non-Latin input will tofu"
+                );
                 None
             }
         };
-        CjkAtlases { source, slots }
     }
 
     /// Make sure every non-ASCII codepoint in `text` exists in every slot.
@@ -361,6 +377,7 @@ impl CjkAtlases {
         if missing.is_empty() {
             return Vec::new();
         }
+        self.resolve_source();
         let Some(font) = self.source.as_ref().and_then(|s| s.font()) else {
             return Vec::new();
         };
