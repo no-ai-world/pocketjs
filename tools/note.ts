@@ -14,6 +14,10 @@
 // chord (⌘Q on macOS) or Ctrl-C here. On exit the shell prints its governor
 // receipt: "pocket-widget: N ticks, M frames rendered" — a settled note
 // should show M ≪ N (measured: 2 frames over 481 ticks).
+//
+// On Windows, transparent composite may degrade; with RUST_LOG=info the host
+// logs `pocket-widget: display_transparent=0|1` (also
+// pocket_widget::display_transparent() in-process).
 import { mkdirSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve as resolvePath } from "node:path";
@@ -41,8 +45,13 @@ const proof = rawArgs.includes("--proof");
 const pass = rawArgs.filter((f) => f !== "--proof");
 
 function defaultDesktopWidgetTarget(): "macos-widget" | "windows-widget" {
-  // 按宿主 OS 选择对等 stock target
-  return platform() === "win32" ? "windows-widget" : "macos-widget";
+  // 仅在已交付 stock host 的 OS 上选择默认 target
+  const os = platform();
+  if (os === "win32") return "windows-widget";
+  if (os === "darwin") return "macos-widget";
+  throw new Error(
+    `pocket-note: no stock desktop-widget target on '${os}' (use macOS or Windows, or pass --target)`,
+  );
 }
 
 const target = (targetOverride ?? defaultDesktopWidgetTarget()) as
@@ -89,7 +98,7 @@ if (proof) {
   } catch {
     // 证明文件本就不存在
   }
-  await $`${bin} --host ${target} --file ${file} --screenshot ${shot} --frames 130 --click 350,15@10 --type PROOF-@30 ${pass}`.env(
+  await $`${bin} --host ${target} --chrome note --title Pocket Note --file ${file} --screenshot ${shot} --frames 130 --click 350,15@10 --type PROOF-@30 ${pass}`.env(
     env,
   );
   const saved = (await Bun.file(file).text()).includes("PROOF-");
@@ -105,5 +114,5 @@ if (proof) {
     await $`cmd /c start "" ${shot}`.nothrow();
   }
 } else {
-  await $`${bin} --host ${target} ${pass}`.env(env);
+  await $`${bin} --host ${target} --chrome note --title Pocket Note ${pass}`.env(env);
 }

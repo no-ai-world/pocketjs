@@ -18,6 +18,9 @@ const features = typeof __POCKET_FEATURES__ === "object" && __POCKET_FEATURES__ 
   ? Object.freeze({ ...__POCKET_FEATURES__ })
   : Object.freeze({});
 
+/** Test-only feature overlay; production builds leave this null. */
+let featureOverrides: Readonly<Partial<Record<PocketCapabilityId, boolean>>> | null = null;
+
 /** Build-time host API availability. Permissions and live device state are separate APIs. */
 export const platform: PocketPlatform = Object.freeze({
   target: typeof __POCKET_TARGET__ === "string" ? __POCKET_TARGET__ : "unknown",
@@ -33,5 +36,16 @@ export const platform: PocketPlatform = Object.freeze({
 // Literal calls are folded by the PocketJS compiler. Keeping this runtime
 // lookup supports computed feature ids and non-manifest builds.
 export function hasFeature(feature: PocketCapabilityId): boolean {
+  if (featureOverrides && Object.prototype.hasOwnProperty.call(featureOverrides, feature)) {
+    return featureOverrides[feature] === true;
+  }
   return platform.features[feature] === true;
+}
+
+/** 测试注入 capability 覆盖；传 null 清除。 */
+export function __setFeatureOverridesForTest(
+  overrides: Readonly<Partial<Record<PocketCapabilityId, boolean>>> | null,
+): void {
+  // 仅测试使用
+  featureOverrides = overrides;
 }

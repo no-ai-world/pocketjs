@@ -8,15 +8,24 @@
 //! (microseconds), zero frames.
 //!
 //!   bun tools/build.ts note-main --density=2
-//!   cargo run -p note-widget
-//!   cargo run -p note-widget -- --file ~/notes/todo.md --width 380 --height 520
+//!   cargo run -p note-widget -- --chrome note --host macos-widget
+//!   cargo run -p note-widget -- --chrome note --file ~/notes/todo.md
+//!   cargo run -p note-widget -- --chrome app --host windows-widget --app counter-main
+//!
+//! Chrome is explicit (default `--chrome app`):
+//!   - `note` — ambient sticky (borderless / on-top / header drag + grip)
+//!   - `app`  — ordinary OS title bar + edges for generic desktop apps
+//! `bun run note` always passes `--chrome note`. Do not infer chrome from
+//! the `--app` output name.
+//!
+//! Identity: `--host macos-widget|windows-widget` (or `POCKETJS_HOST`).
+//! Title: optional `--title`; defaults to "Pocket Note" / `--app`.
 //!
 //! The host is the guest's companion process over the spec svc channel
 //! (ops 30..32): real keyboard/mouse/wheel/resize go in as JSON lines,
-//! save/quit intents come back. Clicks synthesize BTN_CIRCLE, so the
-//! framework's hover-focus + onPress pipeline dispatches them — the app
-//! never sees a platform event, only spec inputs. Drag the header to move,
-//! drag the dotted corner (or any edge, macOS) to resize, ⌘Q/⌘W quits.
+//! save/quit intents come back. Clicks synthesize BTN_CIRCLE. Note chrome
+//! keeps svc `{t:"mouse"}` for editor gestures; app chrome packs the OS
+//! pointer as a touch contact for ordinary onPress apps.
 
 mod cjk;
 mod clipboard;
@@ -284,23 +293,29 @@ impl NoteGame {
             let (_, ev) = self.script.remove(i);
             match ev {
                 ScriptEvent::Click(x, y) => {
-                    // Hover first (focuses the target), then hold CIRCLE for
-                    // a few ticks — the same order a real pointer produces.
-                    self.svc(serde_json::json!({"t": "mouse", "x": x, "y": y, "d": false}));
+                    // Hold CIRCLE + script_drag position. Note chrome also
+                    // hovers via svc mouse; app chrome relies on touch contacts.
+                    if self.note_chrome {
+                        self.svc(serde_json::json!({"t": "mouse", "x": x, "y": y, "d": false}));
+                    }
                     self.script_click_until = self.ticks + 4;
                     self.script_shift = false;
                     self.script_drag = Some((x, y, x, y, self.ticks));
                 }
                 ScriptEvent::ShiftClick(x, y) => {
-                    self.svc(
-                        serde_json::json!({"t": "mouse", "x": x, "y": y, "d": false, "sh": true}),
-                    );
+                    if self.note_chrome {
+                        self.svc(
+                            serde_json::json!({"t": "mouse", "x": x, "y": y, "d": false, "sh": true}),
+                        );
+                    }
                     self.script_click_until = self.ticks + 4;
                     self.script_shift = true;
                     self.script_drag = Some((x, y, x, y, self.ticks));
                 }
                 ScriptEvent::Drag(x0, y0, x1, y1) => {
-                    self.svc(serde_json::json!({"t": "mouse", "x": x0, "y": y0, "d": false}));
+                    if self.note_chrome {
+                        self.svc(serde_json::json!({"t": "mouse", "x": x0, "y": y0, "d": false}));
+                    }
                     self.script_click_until = self.ticks + DRAG_TICKS + 2;
                     self.script_drag = Some((x0, y0, x1, y1, self.ticks));
                 }
@@ -425,33 +440,45 @@ impl FlatWidget for NoteGame {
         let shift = input.key_down(KeyCode::ShiftLeft)
             || input.key_down(KeyCode::ShiftRight)
             || self.script_shift;
-        if let Some((x, y)) = pos {
-            if pressed_edge && !level_down {
-                // The whole click fit inside this tick: deliver both edges
-                // in order so the guest still runs press → release.
-                self.svc(serde_json::json!({"t": "mouse", "x": x, "y": y, "d": true, "sh": shift}));
-                self.svc(serde_json::json!({"t": "mouse", "x": x, "y": y, "d": false, "sh": shift}));
-                self.last_mouse = Some((x, y, false));
-            } else {
-                let m = (x, y, mouse_down);
-                if self.last_mouse != Some(m) {
-                    self.last_mouse = Some(m);
-                    self.svc(
-                        serde_json::json!({"t": "mouse", "x": x, "y": y, "d": mouse_down, "sh": shift}),
-                    );
+        // Note chrome only: editor caret/selection rides svc mouse.
+        // App chrome must not spam note-specific mouse lines — pointer goes
+        // through frame_with_touches + input.pointer instead.
+        if self.note_chrome {
+            if let Some((x, y)) = pos {
+                if pressed_edge && !level_down {
+                    // The whole click fit inside this tick: deliver both edges
+                    // in order so the guest still runs press → release.
+                    self.svc(serde_json::json!({"t": "mouse", "x": x, "y": y, "d": true, "sh": shift}));
+                    self.svc(serde_json::json!({"t": "mouse", "x": x, "y": y, "d": false, "sh": shift}));
+                    self.last_mouse = Some((x, y, false));
+                } else {
+                    let m = (x, y, mouse_down);
+                    if self.last_mouse != Some(m) {
+                        self.last_mouse = Some(m);
+                        self.svc(
+                            serde_json::json!({"t": "mouse", "x": x, "y": y, "d": mouse_down, "sh": shift}),
+                        );
+                    }
                 }
             }
+        } else if let Some((x, y)) = pos {
+            // Still track last position for scripted clicks / release fallback.
+            self.last_mouse = Some((x, y, mouse_down));
         }
 
         // The guest turn (Law 3: exactly one per tick). Clicks are CIRCLE.
-        // Pack the real OS pointer as a touch contact so ordinary apps
-        // (without note's svc mouse bridge) resolve hover/focus/onPress via
-        // framework handleFrame's pointer-contact path.
+        // Note chrome keeps the historical svc mouse bridge only.
+        // App chrome packs the OS pointer as a touch contact so ordinary
+        // onPress apps work without note-specific svc mouse handling.
         let buttons = if mouse_down { BTN_CIRCLE } else { 0 };
-        if let Some((x, y)) = pos {
-            let packed = pack_pointer_touch(x, y);
-            // 0x8080 = centered analog (spec::ANALOG_CENTER).
-            self.guest.frame_with_touches(buttons, 0x8080, &[packed])?;
+        if !self.note_chrome {
+            if let Some((x, y)) = pos {
+                let packed = pack_pointer_touch(x, y);
+                // 0x8080 = centered analog (spec::ANALOG_CENTER).
+                self.guest.frame_with_touches(buttons, 0x8080, &[packed])?;
+            } else {
+                self.guest.frame(buttons)?;
+            }
         } else {
             self.guest.frame(buttons)?;
         }
@@ -617,9 +644,10 @@ struct Args {
     /// Optional override for ui.__host (macos-widget|windows-widget).
     host: Option<String>,
     /// Window chrome: sticky note affordances vs ordinary OS decorations.
+    /// Default is App; note launchers must pass `--chrome note` explicitly.
     chrome: ChromeMode,
-    /// Window title shown for decorated desktop hosts.
-    title: String,
+    /// Optional window title; defaults depend on chrome mode.
+    title: Option<String>,
     screenshot: Option<PathBuf>,
     frames: u64,
     script: Vec<(u64, ScriptEvent)>,
@@ -636,7 +664,7 @@ fn parse_args() -> Result<Args> {
         density: 2,
         host: None,
         chrome: ChromeMode::App,
-        title: "Pocket Desktop".into(),
+        title: None,
         screenshot: None,
         frames: 40,
         script: Vec::new(),
@@ -664,7 +692,7 @@ fn parse_args() -> Result<Args> {
             "--density" => args.density = val("--density")?.parse()?,
             "--host" => args.host = Some(val("--host")?),
             "--chrome" => args.chrome = ChromeMode::parse(&val("--chrome")?)?,
-            "--title" => args.title = val("--title")?,
+            "--title" => args.title = Some(val("--title")?),
             "--screenshot" => args.screenshot = Some(PathBuf::from(val("--screenshot")?)),
             "--frames" => args.frames = val("--frames")?.parse()?,
             "--click" => {
@@ -838,24 +866,18 @@ fn main() -> Result<()> {
     let atlases = cjk::CjkAtlases::from_pak(&std::fs::read(
         resolve_asset(args.pak.clone(), &args.app, "pak")?,
     )?);
-    // Default chrome from common note output names only when --chrome omitted.
-    // Explicit --chrome always wins; never infer from arbitrary app labels.
-    let mut chrome = args.chrome;
-    if chrome == ChromeMode::App
-        && args.app == "note-main"
-        && std::env::args().all(|a| a != "--chrome")
-    {
-        // Historical note launcher path: ambient sticky unless overridden.
-        chrome = ChromeMode::Note;
-    }
-    let note_chrome = chrome == ChromeMode::Note;
-    let title = if args.title != "Pocket Desktop" {
-        args.title.clone()
-    } else if note_chrome {
-        "Pocket Note".into()
-    } else {
-        args.app.clone()
-    };
+    // Chrome is explicit: default App. Note launchers pass `--chrome note`.
+    let note_chrome = args.chrome == ChromeMode::Note;
+    let title = args
+        .title
+        .clone()
+        .unwrap_or_else(|| {
+            if note_chrome {
+                "Pocket Note".into()
+            } else {
+                args.app.clone()
+            }
+        });
     let mut game = NoteGame::new(
         surface,
         guest,

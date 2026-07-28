@@ -148,6 +148,20 @@ one `render_words_scaled` pass on dirty frames. It exercises everything the
   against the host OS's stock target (`macos-widget` on macOS,
   `windows-widget` on Windows) — density and features come from the profile,
   not flags.
+- **Stock `note-widget` chrome is explicit.** Default `--chrome app` is an
+  ordinary OS window (title bar + edges) for generic desktop apps. Pocket
+  Note must pass `--chrome note` (as `bun run note` does) for the ambient
+  sticky: borderless, always-on-top, in-content drag/resize. Do not infer
+  chrome from the app output name.
+- **Pointer paths split by chrome.** Note chrome keeps the historical svc
+  `{t:"mouse"}` bridge for caret/selection. App chrome packs the OS pointer
+  as a wide touch contact + CIRCLE so ordinary `onPress` apps work through
+  `input.pointer` without note-specific svc mouse handling.
+- **Transparent may degrade on Windows.** DX12 swapchains often advertise
+  only Opaque. The shell still boots, logs
+  `pocket-widget: display_transparent=0|1`, and exposes
+  `pocket_widget::display_transparent()` for in-process readers instead of
+  pretending the surface stayed transparent.
 - **Clicks are CIRCLE.** The host synthesizes the spec press button while
   the mouse is down; the app resolves hover → focus (`hitFocusable` +
   `focusNode`) from svc mouse moves, and the framework's stock onPress

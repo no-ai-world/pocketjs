@@ -21,6 +21,7 @@
 //!   The natural shape for text-first widgets (notes, tickers, boards).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -37,6 +38,38 @@ use pocket3d::hud::Hud;
 use pocket3d::input::Input;
 use pocket3d::renderer::Renderer;
 use pocket3d::scene::Scene;
+
+/// Effective window transparency after surface configuration.
+///
+/// Single-window widget hosts only. `None` until a surface is configured.
+/// In-process launchers/tests read [`display_transparent`]; cross-process
+/// parents can grep the stable log line `pocket-widget: display_transparent=`.
+static DISPLAY_TRANSPARENT: AtomicU8 = AtomicU8::new(0); // 0 unknown, 1 opaque, 2 transparent
+
+/// 读取本进程 widget shell 实际生效的透明合成结果。
+pub fn display_transparent() -> Option<bool> {
+    // 供同进程 launcher/测试查询
+    match DISPLAY_TRANSPARENT.load(Ordering::Relaxed) {
+        1 => Some(false),
+        2 => Some(true),
+        _ => None,
+    }
+}
+
+/// 测试/重入 boot 前清空透明状态。
+pub fn clear_display_transparent() {
+    // 恢复 unknown，避免串测粘滞
+    DISPLAY_TRANSPARENT.store(0, Ordering::Relaxed);
+}
+
+fn set_display_transparent(value: bool) {
+    // 单线程 boot 路径写入一次，并打可 grep 的稳定日志
+    DISPLAY_TRANSPARENT.store(if value { 2 } else { 1 }, Ordering::Relaxed);
+    log::info!(
+        "pocket-widget: display_transparent={}",
+        if value { 1 } else { 0 }
+    );
+}
 
 pub struct WidgetConfig {
     pub title: String,
@@ -398,15 +431,23 @@ impl<D: Driver> WidgetApp<D> {
             // so ambient sticky hosts still boot, without pretending the
             // surface stayed transparent.
             match pick_alpha_mode(&surface, &gpu.adapter) {
-                Ok(mode) => surface_config.alpha_mode = mode,
+                Ok(mode) => {
+                    set_display_transparent(true);
+                    surface_config.alpha_mode = mode;
+                }
                 Err(error) => {
+                    // Explicit degrade: sticky hosts still boot, but callers can
+                    // observe the loss via display_transparent() == Some(false).
+                    set_display_transparent(false);
                     log::warn!(
                         "pocket-widget: transparent composite unavailable ({error}); \
-                         degrading to opaque (display.transparent=false for this process)"
+                         degrading to opaque (display_transparent=false)"
                     );
                     surface_config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
                 }
             }
+        } else {
+            set_display_transparent(false);
         }
         surface.configure(&gpu.device, &surface_config);
 
