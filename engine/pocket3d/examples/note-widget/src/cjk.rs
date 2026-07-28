@@ -28,30 +28,10 @@ fn slot_px(slot: u8) -> f32 {
     [12.0, 14.0, 16.0, 18.0, 20.0, 24.0, 36.0][(slot % 7) as usize]
 }
 
-/// System fonts that cover CJK, tried in order; the first whose face maps
-/// '中' wins. The file is mmapped — resident memory stays at the pages the
-/// rasterizer actually touches, not the collection's tens of MB.
-const FONT_CANDIDATES: &[&str] = &[
-    // macOS
-    "/System/Library/Fonts/PingFang.ttc",
-    "/System/Library/Fonts/Hiragino Sans GB.ttc",
-    "/System/Library/Fonts/STHeiti Light.ttc",
-    "/System/Library/Fonts/Supplemental/Songti.ttc",
-    "/Library/Fonts/Arial Unicode.ttf",
-    // Windows — absolute defaults; find() also probes %WINDIR%\\Fonts.
-    r"C:\Windows\Fonts\msyh.ttc",
-    r"C:\Windows\Fonts\msyhbd.ttc",
-    r"C:\Windows\Fonts\msyhl.ttc",
-    r"C:\Windows\Fonts\simsun.ttc",
-    r"C:\Windows\Fonts\simhei.ttf",
-    r"C:\Windows\Fonts\malgun.ttf",
-    r"C:\Windows\Fonts\YuGothM.ttc",
-    r"C:\Windows\Fonts\YuGothR.ttc",
-    r"C:\Windows\Fonts\msgothic.ttc",
-    r"C:\Windows\Fonts\arialuni.ttf",
-];
-
-const WINDOWS_FONT_NAMES: &[&str] = &[
+/// Preferred CJK-capable font *names* only — never hardcode drive letters.
+/// Resolution joins these with OS font directories / env overrides at runtime.
+const PREFERRED_FONT_NAMES: &[&str] = &[
+    // Windows
     "msyh.ttc",
     "msyhbd.ttc",
     "msyhl.ttc",
@@ -62,18 +42,106 @@ const WINDOWS_FONT_NAMES: &[&str] = &[
     "YuGothR.ttc",
     "msgothic.ttc",
     "arialuni.ttf",
+    // macOS
+    "PingFang.ttc",
+    "Hiragino Sans GB.ttc",
+    "STHeiti Light.ttc",
+    "Songti.ttc",
+    "Arial Unicode.ttf",
+    // Linux common packages
+    "NotoSansCJK-Regular.ttc",
+    "NotoSansCJKsc-Regular.otf",
+    "SourceHanSansSC-Regular.otf",
+    "DroidSansFallbackFull.ttf",
+    "WenQuanYiMicroHei.ttf",
 ];
 
-/// Absolute candidates plus `%WINDIR%\\Fonts\\*` when set.
-fn font_candidate_paths() -> Vec<String> {
-    // 展开系统字体搜索路径
-    let mut paths: Vec<String> = FONT_CANDIDATES.iter().map(|p| (*p).to_string()).collect();
-    if let Ok(windir) = std::env::var("WINDIR").or_else(|_| std::env::var("SystemRoot")) {
-        for name in WINDOWS_FONT_NAMES {
-            paths.push(format!(r"{windir}\Fonts\{name}"));
+/// Build candidate font files from env + OS font directories + preferred names.
+fn font_candidate_paths() -> Vec<std::path::PathBuf> {
+    // 按目录发现字体，不写死盘符路径
+    use std::path::PathBuf;
+
+    let mut paths = Vec::new();
+
+    // Explicit override wins: file or directory.
+    if let Ok(override_path) = std::env::var("POCKETJS_CJK_FONT") {
+        let p = PathBuf::from(override_path.trim());
+        if p.is_file() {
+            paths.push(p);
+        } else if p.is_dir() {
+            push_named_fonts(&mut paths, &p);
         }
     }
+
+    for dir in system_font_dirs() {
+        push_named_fonts(&mut paths, &dir);
+    }
+
+    // De-dupe while preserving order.
+    let mut seen = HashSet::new();
+    paths.retain(|p| seen.insert(p.clone()));
     paths
+}
+
+/// OS font directories derived from env / well-known roots (no drive-letter font files).
+fn system_font_dirs() -> Vec<std::path::PathBuf> {
+    // 收集本机字体目录
+    use std::path::PathBuf;
+    let mut dirs = Vec::new();
+
+    if let Ok(windir) = std::env::var("WINDIR").or_else(|_| std::env::var("SystemRoot")) {
+        dirs.push(PathBuf::from(windir).join("Fonts"));
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        dirs.push(
+            PathBuf::from(local)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Fonts"),
+        );
+    }
+
+    // macOS roots are directory roots, not individual font files.
+    dirs.push(PathBuf::from("/System/Library/Fonts"));
+    dirs.push(PathBuf::from("/System/Library/Fonts/Supplemental"));
+    dirs.push(PathBuf::from("/Library/Fonts"));
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(&home).join("Library").join("Fonts"));
+        dirs.push(PathBuf::from(&home).join(".fonts"));
+        dirs.push(PathBuf::from(&home).join(".local").join("share").join("fonts"));
+    }
+
+    // Linux
+    dirs.push(PathBuf::from("/usr/share/fonts"));
+    dirs.push(PathBuf::from("/usr/local/share/fonts"));
+
+    dirs.into_iter().filter(|d| d.is_dir()).collect()
+}
+
+/// Join preferred names under a font directory (direct + one subdirectory).
+fn push_named_fonts(out: &mut Vec<std::path::PathBuf>, dir: &Path) {
+    // 在目录中解析首选字体文件名
+    for name in PREFERRED_FONT_NAMES {
+        let direct = dir.join(name);
+        if direct.is_file() {
+            out.push(direct);
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let sub = entry.path();
+        if !sub.is_dir() {
+            continue;
+        }
+        for name in PREFERRED_FONT_NAMES {
+            let nested = sub.join(name);
+            if nested.is_file() {
+                out.push(nested);
+            }
+        }
+    }
 }
 
 struct GlyphSource {
@@ -84,7 +152,7 @@ struct GlyphSource {
 impl GlyphSource {
     fn find() -> Option<(GlyphSource, String)> {
         for path in font_candidate_paths() {
-            if !Path::new(&path).exists() {
+            if !path.is_file() {
                 continue;
             }
             let Ok(file) = std::fs::File::open(&path) else {
@@ -98,7 +166,10 @@ impl GlyphSource {
                     break;
                 };
                 if font.glyph_id('中').0 != 0 {
-                    return Some((GlyphSource { map, index }, format!("{path}#{index}")));
+                    return Some((
+                        GlyphSource { map, index },
+                        format!("{}#{index}", path.display()),
+                    ));
                 }
             }
         }
