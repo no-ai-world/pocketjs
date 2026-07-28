@@ -232,51 +232,38 @@ export const POCKET_TARGETS = defineTargetRegistry<PocketCapabilityId, {
   // not accept fixed-viewport apps (a future macos-app target would).
   // macos-widget and windows-widget are sibling stock hosts: same form,
   // hostAbi, display policy and capability contract; only platform differs.
-  "macos-widget": {
-    hostAbi: 3,
-    platform: "macos",
-    form: "widget",
-    display: {
-      physicalViewport: [840, 1120],
-      logicalViewports: [[420, 560]],
-      dynamicViewport: { min: [240, 180], max: [4096, 4096] },
-      presentations: ["native"],
-      rasterDensity: 2,
-    },
-    capabilities: [
-      "input.buttons",
-      "input.ime",
-      "input.pointer",
-      "input.text",
-      "host.clipboard",
-      "display.viewport.live",
-      "text.glyphs.baked",
-      "text.glyphs.runtime",
-    ],
-  },
-  "windows-widget": {
-    hostAbi: 3,
-    platform: "windows",
-    form: "widget",
-    display: {
-      physicalViewport: [840, 1120],
-      logicalViewports: [[420, 560]],
-      dynamicViewport: { min: [240, 180], max: [4096, 4096] },
-      presentations: ["native"],
-      rasterDensity: 2,
-    },
-    capabilities: [
-      "input.buttons",
-      "input.ime",
-      "input.pointer",
-      "input.text",
-      "host.clipboard",
-      "display.viewport.live",
-      "text.glyphs.baked",
-      "text.glyphs.runtime",
-    ],
-  },
+  "macos-widget": desktopWidgetProfile("macos"),
+  "windows-widget": desktopWidgetProfile("windows"),
 });
+
+/** Shared desktop-widget stock profile; only `platform` differs per OS. */
+function desktopWidgetProfile(
+  platform: "macos" | "windows",
+): TargetProfile<PocketCapabilityId> {
+  // 构造对等 desktop-widget target
+  return {
+    hostAbi: 3,
+    platform,
+    form: "widget",
+    display: {
+      physicalViewport: [840, 1120],
+      logicalViewports: [[420, 560]],
+      dynamicViewport: { min: [240, 180], max: [4096, 4096] },
+      presentations: ["native"],
+      rasterDensity: 2,
+    },
+    capabilities: [
+      "input.buttons",
+      "input.ime",
+      "input.pointer",
+      "input.text",
+      "host.clipboard",
+      "display.viewport.live",
+      "text.glyphs.baked",
+      "text.glyphs.runtime",
+    ],
+  };
+}
 
 export type PocketTargetId = TargetId<typeof POCKET_TARGETS>;
 

@@ -41,6 +41,7 @@ import { analogX, analogY } from "./frame.ts";
 import { getHost, getOps, hostViewport, type HostOps } from "./host.ts";
 import { get as pakGet } from "./pak.ts";
 import type { NodeMirror } from "./renderer.ts";
+import { hasFeature } from "./platform.ts";
 import { touches } from "./touch.ts";
 
 let root: NodeMirror | null = null;
@@ -761,10 +762,9 @@ export function handleFrame(buttons: number): void {
   const released = prevButtons & ~buttons;
   prevButtons = buttons;
   if (cursor && cursorFrame(buttons, pressed, released)) return;
-  // Desktop hosts (windows-widget / macos-widget) deliver a real pointer as
-  // the primary touch contact + CIRCLE press. Resolve hover/focus from that
-  // contact so ordinary onPress apps work without enableCursor or svc.
-  if (pointerContactFrame(buttons, pressed, released)) return;
+  // Desktop pointer hosts pack the OS cursor as one wide touch contact + CIRCLE.
+  // Gate on input.pointer so Vita multi-touch + buttons still use d-pad/touch paths.
+  if (hasFeature("input.pointer") && pointerContactFrame(buttons, pressed, released)) return;
   if (released & BTN.CIRCLE) setPressedNode(null);
   if (pressed === 0) return;
   if (pressed & BTN.DOWN) moveFocus("down");
@@ -779,10 +779,15 @@ export function handleFrame(buttons: number): void {
 
 /** Real-pointer frame for hosts that pack the OS cursor as a touch contact. */
 function pointerContactFrame(buttons: number, pressed: number, released: number): boolean {
-  // 没有触点时退回 d-pad 模型
+  // 仅在 desktop pointer 语义下消费主触点；多指时固定 id=0
   const list = touches();
   if (list.length === 0) return false;
-  const contact = list[0]!;
+  const contact = list.find((c) => c.id === 0) ?? list[0]!;
+  // If this looks like a multi-touch panel (several distinct ids) and no
+  // CIRCLE edge this frame, leave navigation to the portable path.
+  if (list.length > 1 && (pressed & BTN.CIRCLE) === 0 && (released & BTN.CIRCLE) === 0) {
+    return false;
+  }
   const target = hitFocusable(contact.x, contact.y);
   if (target !== focused) focusNode(target);
   if (pressed & BTN.CIRCLE && target) {

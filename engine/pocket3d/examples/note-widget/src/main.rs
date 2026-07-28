@@ -136,76 +136,28 @@ impl NoteGame {
         self.surface.svc_push(value.to_string());
     }
 
-    /// Serve the feed demo's mock API over the host svc channel.
-    fn serve_feed(&self, query: &str) {
-        // 读取本地 mock API 并回推 feed 事件
-        let path = std::env::var("POCKETJS_FEED_API").unwrap_or_default();
-        if path.is_empty() {
-            self.svc(serde_json::json!({
-                "t": "feed",
-                "ok": false,
-                "error": "POCKETJS_FEED_API is not set",
-            }));
-            return;
-        }
-        match std::fs::read_to_string(&path) {
-            Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
-                Ok(mut doc) => {
-                    let q = query.trim().to_ascii_uppercase();
-                    if !q.is_empty() {
-                        if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
-                            items.retain(|item| {
-                                item.get("tag")
-                                    .and_then(|t| t.as_str())
-                                    .map(|t| t.eq_ignore_ascii_case(&q))
-                                    .unwrap_or(false)
-                            });
-                        }
-                    }
-                    let count = doc
-                        .get("items")
-                        .and_then(|v| v.as_array())
-                        .map(|a| a.len())
-                        .unwrap_or(0);
-                    let source = doc
-                        .get("source")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("mock-api")
-                        .to_string();
-                    let fetched_at = chrono_like_now();
-                    self.svc(serde_json::json!({
-                        "t": "feed",
-                        "ok": true,
-                        "items": doc.get("items").cloned().unwrap_or_else(|| serde_json::json!([])),
-                        "fetchedAt": fetched_at,
-                        "source": source,
-                    }));
-                    log::info!("note-widget: served feed q={q:?} items={count} from {path}");
-                }
-                Err(error) => self.svc(serde_json::json!({
-                    "t": "feed",
-                    "ok": false,
-                    "error": format!("invalid feed json: {error}"),
-                })),
-            },
-            Err(error) => self.svc(serde_json::json!({
-                "t": "feed",
-                "ok": false,
-                "error": format!("read {path}: {error}"),
-            })),
-        }
-    }
-
     /// Tell the mounted framework to resize app + overlay roots.
     fn call_resize_viewport(&self, w: u32, h: u32) -> Result<()> {
         // 调用 guest 的 live-viewport hook
         self.guest.with(|ctx| -> Result<()> {
             use pocket_mod::qjs::{Function, Value};
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static WARNED_MISSING: AtomicBool = AtomicBool::new(false);
             let globals = ctx.globals();
             let Ok(hook) = globals.get::<_, Value>("__pocketResizeViewport") else {
+                if !WARNED_MISSING.swap(true, Ordering::Relaxed) {
+                    log::warn!(
+                        "note-widget: __pocketResizeViewport missing; live resize will leave app/overlay layers stale"
+                    );
+                }
                 return Ok(());
             };
             if !Function::from_value(hook.clone()).is_ok() {
+                if !WARNED_MISSING.swap(true, Ordering::Relaxed) {
+                    log::warn!(
+                        "note-widget: __pocketResizeViewport is not a function; live resize will leave layers stale"
+                    );
+                }
                 return Ok(());
             }
             let hook = Function::from_value(hook)
@@ -513,11 +465,6 @@ impl FlatWidget for NoteGame {
                     Some("quit") => self.exit = true,
                     Some("menu") => self.guest_menu_open = v["open"].as_bool().unwrap_or(false),
                     Some("copy") => clipboard::copy(v["text"].as_str().unwrap_or_default()),
-                    Some("fetch-feed") => {
-                        // Desktop feed demo: host reads the mock API file.
-                        let q = v["q"].as_str().unwrap_or("");
-                        self.serve_feed(q);
-                    }
                     Some("caret") => {
                         self.caret_rect = Some((
                             v["x"].as_f64().unwrap_or(0.0) as f32,
@@ -612,24 +559,15 @@ impl FlatWidget for NoteGame {
 
 /// Pack a logical pointer as the wide touch wire form (framework/src/touch.ts).
 fn pack_pointer_touch(x: f32, y: f32) -> u32 {
-    // 宽坐标触点打包
+    // Mirror framework/src/touch.ts __packTouchWide(id=0, x, y).
     const WIDE_MARKER: u32 = 0x8000_0000;
     const COORD_BITS: u32 = 10;
     const COORD_MASK: u32 = (1 << COORD_BITS) - 1;
+    const ID_SHIFT: u32 = COORD_BITS * 2;
     let x = x.round().clamp(0.0, COORD_MASK as f32) as u32;
     let y = y.round().clamp(0.0, COORD_MASK as f32) as u32;
-    WIDE_MARKER | (y << COORD_BITS) | x
-}
-
-/// 生成简易时间戳字符串。
-fn chrono_like_now() -> String {
-    // 不用额外时间 crate，wall-clock 秒足够 demo
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("unix:{secs}")
+    let id = 0u32; // stable primary desktop pointer
+    WIDE_MARKER | (id << ID_SHIFT) | (y << COORD_BITS) | x
 }
 
 /// FNV-1a 64 over the DrawList words (embed.rs's dirty signal).
@@ -648,6 +586,27 @@ fn fnv1a64(words: &[u32]) -> u64 {
 // boot + CLI
 // ---------------------------------------------------------------------------
 
+/// Desktop window chrome policy for the stock host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChromeMode {
+    /// Borderless ambient sticky: in-content drag/resize grip.
+    Note,
+    /// Ordinary OS title bar + edges.
+    App,
+}
+
+impl ChromeMode {
+    fn parse(raw: &str) -> Result<Self> {
+        match raw {
+            "note" | "sticky" => Ok(Self::Note),
+            "app" | "window" | "decorated" => Ok(Self::App),
+            other => Err(anyhow!(
+                "unsupported --chrome '{other}' (expected note|app)"
+            )),
+        }
+    }
+}
+
 struct Args {
     app: String,
     js: Option<PathBuf>,
@@ -657,6 +616,10 @@ struct Args {
     density: u32,
     /// Optional override for ui.__host (macos-widget|windows-widget).
     host: Option<String>,
+    /// Window chrome: sticky note affordances vs ordinary OS decorations.
+    chrome: ChromeMode,
+    /// Window title shown for decorated desktop hosts.
+    title: String,
     screenshot: Option<PathBuf>,
     frames: u64,
     script: Vec<(u64, ScriptEvent)>,
@@ -672,6 +635,8 @@ fn parse_args() -> Result<Args> {
         size: (420, 560),
         density: 2,
         host: None,
+        chrome: ChromeMode::App,
+        title: "Pocket Desktop".into(),
         screenshot: None,
         frames: 40,
         script: Vec::new(),
@@ -698,6 +663,8 @@ fn parse_args() -> Result<Args> {
             "--height" => args.size.1 = val("--height")?.parse()?,
             "--density" => args.density = val("--density")?.parse()?,
             "--host" => args.host = Some(val("--host")?),
+            "--chrome" => args.chrome = ChromeMode::parse(&val("--chrome")?)?,
+            "--title" => args.title = val("--title")?,
             "--screenshot" => args.screenshot = Some(PathBuf::from(val("--screenshot")?)),
             "--frames" => args.frames = val("--frames")?.parse()?,
             "--click" => {
@@ -822,8 +789,8 @@ fn host_identity(explicit: Option<&str>) -> Result<(&'static str, u32)> {
             } else if cfg!(target_os = "macos") {
                 "macos-widget".into()
             } else {
-                // Desktop widget stock hosts are macOS + Windows today.
-                "macos-widget".into()
+                // No stock desktop-widget identity outside macOS/Windows.
+                "unsupported".into()
             }
         });
     match raw.as_str() {
@@ -871,7 +838,24 @@ fn main() -> Result<()> {
     let atlases = cjk::CjkAtlases::from_pak(&std::fs::read(
         resolve_asset(args.pak.clone(), &args.app, "pak")?,
     )?);
-    let note_chrome = args.app == "note-main" || args.app == "note";
+    // Default chrome from common note output names only when --chrome omitted.
+    // Explicit --chrome always wins; never infer from arbitrary app labels.
+    let mut chrome = args.chrome;
+    if chrome == ChromeMode::App
+        && args.app == "note-main"
+        && std::env::args().all(|a| a != "--chrome")
+    {
+        // Historical note launcher path: ambient sticky unless overridden.
+        chrome = ChromeMode::Note;
+    }
+    let note_chrome = chrome == ChromeMode::Note;
+    let title = if args.title != "Pocket Desktop" {
+        args.title.clone()
+    } else if note_chrome {
+        "Pocket Note".into()
+    } else {
+        args.app.clone()
+    };
     let mut game = NoteGame::new(
         surface,
         guest,
@@ -887,9 +871,10 @@ fn main() -> Result<()> {
         headless(game, args, &out)
     } else if note_chrome {
         // Pocket Note: ambient sticky — borderless, transparent, always-on-top.
+        // Transparent may degrade to opaque on some Windows adapters; shell logs it.
         pocket_widget::run_flat(
             WidgetConfig {
-                title: "Pocket Note".into(),
+                title,
                 size: args.size,
                 resizable: true,
                 min_size: (240, 180),
@@ -899,12 +884,10 @@ fn main() -> Result<()> {
             game,
         )
     } else {
-        // Generic desktop demos (windows-widget counter, …): ordinary OS
-        // window chrome so drag/resize match platform apps (title bar +
-        // edges), not a custom borderless grip.
+        // Ordinary OS window chrome: title bar + edges, no custom grip.
         pocket_widget::run_flat(
             WidgetConfig {
-                title: "Pocket Desktop".into(),
+                title,
                 size: args.size,
                 transparent: false,
                 decorations: true,

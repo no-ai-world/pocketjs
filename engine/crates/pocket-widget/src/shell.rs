@@ -394,12 +394,16 @@ impl<D: Driver> WidgetApp<D> {
         surface_config.present_mode = wgpu::PresentMode::AutoVsync;
         if self.config.transparent {
             // Windows DX12 swapchains often only advertise Opaque. Prefer a
-            // real composite alpha when the surface offers one; otherwise log
-            // and run opaque so the stock desktop-widget host still boots.
+            // real composite alpha when offered; otherwise degrade explicitly
+            // so ambient sticky hosts still boot, without pretending the
+            // surface stayed transparent.
             match pick_alpha_mode(&surface, &gpu.adapter) {
                 Ok(mode) => surface_config.alpha_mode = mode,
                 Err(error) => {
-                    log::warn!("pocket-widget: {error}; falling back to opaque composite");
+                    log::warn!(
+                        "pocket-widget: transparent composite unavailable ({error}); \
+                         degrading to opaque (display.transparent=false for this process)"
+                    );
                     surface_config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
                 }
             }

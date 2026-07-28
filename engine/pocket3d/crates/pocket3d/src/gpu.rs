@@ -105,6 +105,13 @@ impl Gpu {
             wgpu::PowerPreference::LowPower => widget_limits(&adapter),
             _ => wgpu::Limits::default(),
         };
+        if power_preference == wgpu::PowerPreference::LowPower {
+            log::info!(
+                "widget limits: max_texture_2d={}, max_buffer_size={}",
+                required_limits.max_texture_dimension_2d,
+                required_limits.max_buffer_size
+            );
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("pocket3d"),

@@ -38,7 +38,7 @@ const FONT_CANDIDATES: &[&str] = &[
     "/System/Library/Fonts/STHeiti Light.ttc",
     "/System/Library/Fonts/Supplemental/Songti.ttc",
     "/Library/Fonts/Arial Unicode.ttf",
-    // Windows
+    // Windows — absolute defaults; find() also probes %WINDIR%\\Fonts.
     r"C:\Windows\Fonts\msyh.ttc",
     r"C:\Windows\Fonts\msyhbd.ttc",
     r"C:\Windows\Fonts\msyhl.ttc",
@@ -51,6 +51,31 @@ const FONT_CANDIDATES: &[&str] = &[
     r"C:\Windows\Fonts\arialuni.ttf",
 ];
 
+const WINDOWS_FONT_NAMES: &[&str] = &[
+    "msyh.ttc",
+    "msyhbd.ttc",
+    "msyhl.ttc",
+    "simsun.ttc",
+    "simhei.ttf",
+    "malgun.ttf",
+    "YuGothM.ttc",
+    "YuGothR.ttc",
+    "msgothic.ttc",
+    "arialuni.ttf",
+];
+
+/// Absolute candidates plus `%WINDIR%\\Fonts\\*` when set.
+fn font_candidate_paths() -> Vec<String> {
+    // 展开系统字体搜索路径
+    let mut paths: Vec<String> = FONT_CANDIDATES.iter().map(|p| (*p).to_string()).collect();
+    if let Ok(windir) = std::env::var("WINDIR").or_else(|_| std::env::var("SystemRoot")) {
+        for name in WINDOWS_FONT_NAMES {
+            paths.push(format!(r"{windir}\Fonts\{name}"));
+        }
+    }
+    paths
+}
+
 struct GlyphSource {
     map: memmap2::Mmap,
     index: u32,
@@ -58,11 +83,11 @@ struct GlyphSource {
 
 impl GlyphSource {
     fn find() -> Option<(GlyphSource, String)> {
-        for path in FONT_CANDIDATES {
-            if !Path::new(path).exists() {
+        for path in font_candidate_paths() {
+            if !Path::new(&path).exists() {
                 continue;
             }
-            let Ok(file) = std::fs::File::open(path) else {
+            let Ok(file) = std::fs::File::open(&path) else {
                 continue;
             };
             let Ok(map) = (unsafe { memmap2::Mmap::map(&file) }) else {
