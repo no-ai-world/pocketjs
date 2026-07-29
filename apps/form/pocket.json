@@ -1,0 +1,45 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "dev.pocket-stack.form",
+  "name": "pocketjs-form",
+  "title": "PocketJS: Form",
+  "version": "0.1.0",
+  "engine": {
+    "capabilities": {
+      "requires": [
+        "text.glyphs.baked",
+        "input.buttons"
+      ],
+      "enhances": [
+        "input.text",
+        "input.pointer",
+        "input.ime",
+        "host.clipboard",
+        "display.viewport.live",
+        "text.glyphs.runtime"
+      ]
+    }
+  },
+  "app": {
+    "entry": "apps/form/main.tsx",
+    "output": "form-main",
+    "framework": "solid",
+    "viewport": {
+      "dynamic": {
+        "default": [
+          480,
+          360
+        ],
+        "min": [
+          320,
+          240
+        ],
+        "max": [
+          960,
+          720
+        ]
+      }
+    }
+  }
+}

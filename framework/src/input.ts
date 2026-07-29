@@ -106,6 +106,15 @@ export function registerFocusable(node: NodeMirror, on: boolean): void {
   }
 }
 
+/** 标记焦点角色：action 走 onPress；editable 吞文本键。 */
+export function registerFocusKind(
+  node: NodeMirror,
+  kind: "action" | "editable" | undefined,
+): void {
+  node.focusKind = kind;
+  __notifyTreeMutation();
+}
+
 // ---- focus ------------------------------------------------------------------
 
 /** Programmatic focus (also used internally). null clears. */
@@ -170,6 +179,27 @@ function moveLinearFocus(direction: FocusDirection): void {
   const j = i + dir;
   if (j < 0 || j >= list.length) return; // clamp at the ends
   focusNode(list[j]);
+}
+
+/** Tab / Shift+Tab：按文档序在 focusable 间循环。 */
+export function moveFocusByTab(dir: 1 | -1): void {
+  const list = focusables();
+  if (list.length === 0) {
+    if (focused) focusNode(null);
+    return;
+  }
+  const i = focused ? list.indexOf(focused) : -1;
+  if (i < 0) {
+    focusNode(dir === 1 ? list[0]! : list[list.length - 1]!);
+    return;
+  }
+  const j = (i + dir + list.length) % list.length;
+  focusNode(list[j]!);
+}
+
+/** 当前焦点是否为可编辑字段。 */
+export function isEditableFocused(): boolean {
+  return focused?.focusKind === "editable";
 }
 
 export interface FocusGridOptions {

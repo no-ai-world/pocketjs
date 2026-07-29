@@ -21,6 +21,8 @@ export interface ViewProps {
   style?: StyleObject;
   onPress?: () => void;
   focusable?: boolean;
+  /** action=按钮；editable=输入（文本键只进 editable）。 */
+  focusKind?: "action" | "editable";
   /** DevTools semantic name shown in the component tree (docs/DEVTOOLS.md). */
   debugName?: string;
   ref?: RefProp;

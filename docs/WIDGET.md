@@ -120,13 +120,15 @@ one `render_words_scaled` pass on dirty frames. It exercises everything the
   windows keep macOS edge-resize; the shell also tracks an explicit
   grip-corner drag (`resize_at`, `WidgetConfig::resizable`/`min_size`).
 - **The svc channel is the desktop companion contract.** The spec mailbox
-  (ops 30..32) needs no new ops for a host that lives in-process: real
-  keyboard/mouse/wheel/resize go to the guest as JSON lines
-  (`{t:"ch"|"key"|"mouse"|"scroll"|"resize"|"load"}`), save/quit intents
-  come back (`{t:"save"|"quit"}`). The app source retains a svc-less
-  read-only fallback, but the current Note manifest is dynamic-only; it must
-  add a fixed viewport variant before a PSP or embedded host can admit that
-  fallback. The §7 `widget` surface stays unbuilt.
+  (ops 30..32) needs no new ops for a host that lives in-process. Shell
+  input (resize / scroll / pointer / text / key / ime / paste) is tagged
+  `src:"shell"` and consumed via `connectHostInput()` / `installHostInputPump()`;
+  companion business JSONL is tagged `src:"companion"` and consumed via
+  `connectCompanion()` — apps never hand-filter `isHostEvent`. Note still
+  accepts untagged historical lines. Guest intents (`save`/`quit`/`copy`/
+  `caret`/`ensure_text`) return on the same mailbox; unknown guest lines
+  forward to an optional external companion process. The §7 `widget`
+  surface stays unbuilt.
 - **The desktop surface is first-class in the platform contracts.** Six
   registered capability ids name it (`input.text`, `input.pointer`,
   `input.ime`, `host.clipboard`, `display.viewport.live`,
@@ -148,15 +150,27 @@ one `render_words_scaled` pass on dirty frames. It exercises everything the
   against the host OS's stock target (`macos-widget` on macOS,
   `windows-widget` on Windows) — density and features come from the profile,
   not flags.
-- **Stock `note-widget` chrome is explicit.** Default `--chrome app` is an
-  ordinary OS window (title bar + edges) for generic desktop apps. Pocket
-  Note must pass `--chrome note` (as `bun run note` does) for the ambient
-  sticky: borderless, always-on-top, in-content drag/resize. Do not infer
-  chrome from the app output name.
+- **Stock `note-widget` is the desktop App Shell.** Default `--chrome app`
+  is an ordinary OS window (title bar + edges) for any `*-main` bundle:
+  `bun run app-widget form` or
+  `cargo run -p note-widget -- --chrome app --app form-main`. Pocket Note
+  must pass `--chrome note` (as `bun run note` does) for the ambient
+  sticky. Do not infer chrome from the app output name.
 - **Pointer paths split by chrome.** Note chrome keeps the historical svc
-  `{t:"mouse"}` bridge for caret/selection. App chrome packs the OS pointer
-  as a wide touch contact + CIRCLE so ordinary `onPress` apps work through
-  `input.pointer` without note-specific svc mouse handling.
+  `{t:"mouse"}` bridge for the markdown editor. App chrome packs the OS
+  pointer as a wide touch contact + CIRCLE for `onPress`, and also emits
+  shell `{t:"mouse"}` so framework `TextInput` can place carets/selections.
+- **Framework TextInput.** `@pocketjs/framework/components` exports a
+  controlled single/multi-line `TextInput` (value / placeholder / disabled,
+  onChange / onSubmit / onBlur) backed by `@pocketjs/framework/text-edit`
+  math and the host-input pump. Focus kinds split `action` (buttons) from
+  `editable` (fields): text keys only reach the focused editable; Tab moves
+  focus. Clipboard copy/cut/paste and IME preedit/commit are framework-level
+  on any app that declares `input.text` / `host.clipboard` / `input.ime`.
+- **Companion lifecycle.** `--companion <program> [--companion-arg …]
+  [--companion-cwd <dir>]` spawns a stdio JSONL child (stderr inherited).
+  Crash → shell `{t:"companion_offline"}` to the guest; optional bounded
+  restart; process dies with the window.
 - **Transparent may degrade on Windows.** DX12 swapchains often advertise
   only Opaque. The shell still boots, logs
   `pocket-widget: display_transparent=0|1`, and exposes
@@ -169,9 +183,9 @@ one `render_words_scaled` pass on dirty frames. It exercises everything the
   now spans the overlay layer, fixing menus for every cursor-mode app).
 - **Text editing without an OSK.** The `pocket3d` `Input` grew a per-frame
   edit-keystroke stream (chars with layout applied, named keys, repeats)
-  and a wheel accumulator; the guest's editor (measured soft wrap, caret
-  math, click-to-caret, drag selection, a coalescing undo/redo stack
-  driven by ⌘Z/⇧⌘Z) is pure JS over `measureText`, unit-tested in bun.
+  and a wheel accumulator. Edit math (wrap / caret / selection / undo) lives
+  in `@pocketjs/framework/text-edit`; Note re-exports it, and `TextInput`
+  is the reusable form control. Unit-tested in bun.
   Preview mode gets browser-style drag selection over the rendered rows
   (select.ts — (row, char) space, boundary rows clipped, code blocks
   atomic) and clicks are inert, exactly like a real markdown preview —

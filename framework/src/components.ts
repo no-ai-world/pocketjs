@@ -30,6 +30,7 @@ import {
 import { setDebugName } from "./native-tree.ts";
 
 export { View, Text, Image, Sprite, type ViewProps, type TextProps, type ImageProps, type SpriteProps } from "./primitives.ts";
+export { TextInput, type TextInputProps } from "./text-input.tsx";
 export {
   DeepZoom,
   type DeepZoomGesture,
@@ -69,7 +70,8 @@ export function Focusable(props: FocusableProps): SolidJSX.Element {
   // mergeProps, not object spread: spreading reads the compiled prop
   // getters once and freezes dynamic class/style (the reactive-leak class
   // of bug this file must never reintroduce).
-  return View(mergeProps(props, { focusable: true }) as ViewProps);
+  // 默认 action：文本键不进按钮；TextInput 自行设 editable。
+  return View(mergeProps({ focusKind: "action" as const }, props, { focusable: true }) as ViewProps);
 }
 
 export interface NamedProps {

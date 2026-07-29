@@ -39,9 +39,37 @@ describe("desktop-widget host invariants", () => {
     // Note vs app pointer paths are intentionally split (live + scripted).
     expect(src).toContain("Note chrome keeps the historical svc mouse bridge only");
     expect(src).toContain("frame_with_touches");
-    expect(src).toContain("App chrome must not spam note-specific mouse lines");
-    expect(src).toContain("app chrome relies on touch contacts");
-    expect(src).toMatch(/if self\.note_chrome \{[\s\S]*t": "mouse"/);
+    expect(src).toContain("shell_svc");
+    expect(src).toContain("companion_svc");
+    expect(src).toContain("or_insert_with");
+    expect(src).toContain("set_svc_allowlist");
+    expect(src).toContain("send_shell_hello");
+    expect(src).toContain("companion_offline");
+  });
+
+  test("companion bridge is productized with offline + restart", () => {
+    const src = readFileSync(
+      join(root, "engine/pocket3d/examples/note-widget/src/companion.rs"),
+      "utf8",
+    );
+    expect(src).toContain("RestartPolicy");
+    expect(src).toContain("became_offline");
+    expect(src).toContain("max_restarts");
+    expect(src).toContain("stderr(Stdio::inherit())");
+  });
+
+  test("framework exposes TextInput, text-edit, and host-input split", () => {
+    const pkg = readFileSync(join(root, "package.json"), "utf8");
+    expect(pkg).toContain('"./text-edit"');
+    expect(pkg).toContain('"./host-input"');
+    expect(pkg).toContain('"app-widget"');
+    const components = readFileSync(join(root, "framework/src/components.ts"), "utf8");
+    expect(components).toContain("TextInput");
+    expect(components).toContain('focusKind: "action"');
+    const inputApi = readFileSync(join(root, "framework/src/input-api.ts"), "utf8");
+    expect(inputApi).toContain("connectHostInput");
+    expect(inputApi).toContain("connectCompanion");
+    expect(inputApi).toContain("moveFocusByTab");
   });
 
   test("note launcher requests sticky chrome explicitly and rejects unknown OS defaults", () => {
@@ -56,7 +84,7 @@ describe("desktop-widget host invariants", () => {
   test("docs and shell expose explicit transparent degrade", () => {
     // 文档与 API 承认 Windows 可能降到 opaque
     const docs = readFileSync(join(root, "docs/WIDGET.md"), "utf8");
-    expect(docs).toContain("Stock `note-widget` chrome is explicit");
+    expect(docs).toContain("Stock `note-widget` is the desktop App Shell");
     expect(docs).toContain("Transparent may degrade on Windows");
     expect(docs).toContain("display_transparent()");
 

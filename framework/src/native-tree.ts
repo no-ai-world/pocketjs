@@ -24,6 +24,8 @@ export interface NodeMirror {
   domData?: string;
   /** Focus traversal membership (input.ts). */
   focusable?: boolean;
+  /** action=按钮；editable=输入字段（文本键只进 editable）。 */
+  focusKind?: "action" | "editable";
   /** CIRCLE handler while focused (input.ts). */
   onPress?: (() => void) | undefined;
   /** DevTools semantic name (`debugName` prop / <Named> wrapper). */
@@ -75,6 +77,7 @@ const NATIVE_ATTRIBUTE_NAMES = new Set([
   "onPress",
   "on:press",
   "focusable",
+  "focusKind",
   "debugName",
   "ref",
   "nodeRef",
@@ -620,6 +623,10 @@ export function setProp<T>(node: NodeMirror, name: string, value: T, prev?: T): 
       return value;
     case "focusable":
       registerFocusable(node, !!value);
+      return value;
+    case "focusKind":
+      node.focusKind =
+        value === "editable" || value === "action" ? value : undefined;
       return value;
     case "debugName":
       setDebugName(node, value == null ? undefined : String(value));

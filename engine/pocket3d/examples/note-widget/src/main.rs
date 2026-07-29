@@ -26,9 +26,15 @@
 //! save/quit intents come back. Clicks synthesize BTN_CIRCLE. Note chrome
 //! keeps svc `{t:"mouse"}` for editor gestures; app chrome packs the OS
 //! pointer as a touch contact for ordinary onPress apps.
+//!
+//! Optional external companion (bililive-style business host):
+//!   --companion <program> [--companion-arg …] [--companion-cwd <dir>]
+//! Guest JSON lines that are not note-local intents are forwarded to the
+//! companion stdin; companion stdout lines are pushed to the guest svc.
 
 mod cjk;
 mod clipboard;
+mod companion;
 
 use std::path::{Path, PathBuf};
 
@@ -91,6 +97,8 @@ struct NoteGame {
     /// Scripted drag in flight: (x0, y0, x1, y1, start tick).
     script_drag: Option<(f32, f32, f32, f32, u64)>,
     quit_after: Option<u64>,
+    /// Optional external companion (JSON lines on stdio).
+    companion: Option<companion::CompanionBridge>,
 }
 
 enum ScriptEvent {
@@ -138,11 +146,36 @@ impl NoteGame {
             script_shift: false,
             script_drag: None,
             quit_after: None,
+            companion: None,
         }
     }
 
     fn svc(&self, value: serde_json::Value) {
         self.surface.svc_push(value.to_string());
+    }
+
+    /// 壳事件：统一打 src=shell，避免与 companion 业务 hello 冲突。
+    fn shell_svc(&self, mut value: serde_json::Value) {
+        if let Some(obj) = value.as_object_mut() {
+            obj.entry("src").or_insert_with(|| serde_json::json!("shell"));
+        }
+        self.svc(value);
+    }
+
+    /// companion 行：打 src=companion，guest 用 connectCompanion 过滤。
+    fn companion_svc(&self, line: &str) {
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(mut value) => {
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("src".into(), serde_json::json!("companion"));
+                }
+                self.svc(value);
+            }
+            Err(_) => {
+                // 非 JSON 业务行原样推送（仍可由 connectCompanion 放行）
+                self.surface.svc_push(line.to_string());
+            }
+        }
     }
 
     /// Tell the mounted framework to resize app + overlay roots.
@@ -193,17 +226,22 @@ impl NoteGame {
     /// The svc hello: viewport first, then the document (order matters — the
     /// app lays text out against the viewport it was just told about).
     fn send_hello(&mut self) {
-        self.svc(serde_json::json!({"t": "hello", "w": self.logical.0, "h": self.logical.1}));
+        self.shell_svc(serde_json::json!({"t": "hello", "w": self.logical.0, "h": self.logical.1}));
         let text = std::fs::read_to_string(&self.file).unwrap_or_default();
         if !text.is_empty() {
             self.ensure_text(&text);
-            self.svc(serde_json::json!({"t": "load", "text": text}));
+            self.shell_svc(serde_json::json!({"t": "load", "text": text}));
         }
         log::info!(
             "note-widget: {} ({} bytes)",
             self.file.display(),
             text.len()
         );
+    }
+
+    /// 通用 app 壳 hello：只报视口，不夹带 note load/文档语义。
+    fn send_shell_hello(&mut self) {
+        self.shell_svc(serde_json::json!({"t": "hello", "w": self.logical.0, "h": self.logical.1}));
     }
 
     fn save(&self, text: &str) {
@@ -246,13 +284,13 @@ impl NoteGame {
             if !chars.is_empty() {
                 let batch = std::mem::take(&mut chars);
                 self.ensure_text(&batch);
-                self.svc(serde_json::json!({"t": "ch", "s": batch}));
+                self.shell_svc(serde_json::json!({"t": "ch", "s": batch}));
             }
-            self.svc(serde_json::json!({"t": "key", "k": named, "sh": shift}));
+            self.shell_svc(serde_json::json!({"t": "key", "k": named, "sh": shift}));
         }
         if !chars.is_empty() {
             self.ensure_text(&chars);
-            self.svc(serde_json::json!({"t": "ch", "s": chars}));
+            self.shell_svc(serde_json::json!({"t": "ch", "s": chars}));
         }
     }
 
@@ -267,15 +305,15 @@ impl NoteGame {
                     let cursor = range.map(|(lo, _)| {
                         text.char_indices().take_while(|(i, _)| *i < lo).count()
                     });
-                    self.svc(serde_json::json!({"t": "ime", "s": text, "c": cursor}));
+                    self.shell_svc(serde_json::json!({"t": "ime", "s": text, "c": cursor}));
                 }
                 ImeInput::Commit(text) => {
                     self.ensure_text(&text);
-                    self.svc(serde_json::json!({"t": "ch", "s": text}));
+                    self.shell_svc(serde_json::json!({"t": "ch", "s": text}));
                 }
                 ImeInput::Enabled => {}
                 ImeInput::Disabled => {
-                    self.svc(serde_json::json!({"t": "ime", "s": "", "c": null}));
+                    self.shell_svc(serde_json::json!({"t": "ime", "s": "", "c": null}));
                 }
             }
         }
@@ -296,7 +334,7 @@ impl NoteGame {
                     // Hold CIRCLE + script_drag position. Note chrome also
                     // hovers via svc mouse; app chrome relies on touch contacts.
                     if self.note_chrome {
-                        self.svc(serde_json::json!({"t": "mouse", "x": x, "y": y, "d": false}));
+                        self.shell_svc(serde_json::json!({"t": "mouse", "x": x, "y": y, "d": false}));
                     }
                     self.script_click_until = self.ticks + 4;
                     self.script_shift = false;
@@ -304,7 +342,7 @@ impl NoteGame {
                 }
                 ScriptEvent::ShiftClick(x, y) => {
                     if self.note_chrome {
-                        self.svc(
+                        self.shell_svc(
                             serde_json::json!({"t": "mouse", "x": x, "y": y, "d": false, "sh": true}),
                         );
                     }
@@ -314,26 +352,26 @@ impl NoteGame {
                 }
                 ScriptEvent::Drag(x0, y0, x1, y1) => {
                     if self.note_chrome {
-                        self.svc(serde_json::json!({"t": "mouse", "x": x0, "y": y0, "d": false}));
+                        self.shell_svc(serde_json::json!({"t": "mouse", "x": x0, "y": y0, "d": false}));
                     }
                     self.script_click_until = self.ticks + DRAG_TICKS + 2;
                     self.script_drag = Some((x0, y0, x1, y1, self.ticks));
                 }
                 ScriptEvent::Type(s) => {
                     self.ensure_text(&s);
-                    self.svc(serde_json::json!({"t": "ch", "s": s}));
+                    self.shell_svc(serde_json::json!({"t": "ch", "s": s}));
                 }
                 ScriptEvent::Paste(text) => {
                     self.ensure_text(&text);
-                    self.svc(serde_json::json!({"t": "paste", "text": text}));
+                    self.shell_svc(serde_json::json!({"t": "paste", "text": text}));
                 }
                 ScriptEvent::Preedit(text) => {
                     self.ensure_text(&text);
                     let n = text.chars().count();
-                    self.svc(serde_json::json!({"t": "ime", "s": text, "c": n}));
+                    self.shell_svc(serde_json::json!({"t": "ime", "s": text, "c": n}));
                 }
-                ScriptEvent::Key(k) => self.svc(serde_json::json!({"t": "key", "k": k})),
-                ScriptEvent::Scroll(dy) => self.svc(serde_json::json!({"t": "scroll", "dy": dy})),
+                ScriptEvent::Key(k) => self.shell_svc(serde_json::json!({"t": "key", "k": k})),
+                ScriptEvent::Scroll(dy) => self.shell_svc(serde_json::json!({"t": "scroll", "dy": dy})),
             }
         }
     }
@@ -349,7 +387,12 @@ impl FlatWidget for NoteGame {
         self.scale = scale;
         if !self.booted {
             self.booted = true;
-            self.send_hello();
+            // Note chrome: viewport + document. App chrome: viewport-only shell hello.
+            if self.note_chrome {
+                self.send_hello();
+            } else {
+                self.send_shell_hello();
+            }
         }
 
         // ⌘Q / ⌘W quit (the widget has no titlebar close button).
@@ -362,13 +405,13 @@ impl FlatWidget for NoteGame {
         // under ⌘, so chords travel as named keys).
         if input.super_down() && input.key_pressed(KeyCode::KeyZ) {
             let redo = input.key_down(KeyCode::ShiftLeft) || input.key_down(KeyCode::ShiftRight);
-            self.svc(serde_json::json!({"t": "key", "k": if redo { "Redo" } else { "Undo" }}));
+            self.shell_svc(serde_json::json!({"t": "key", "k": if redo { "Redo" } else { "Undo" }}));
         }
         if input.super_down() && input.key_pressed(KeyCode::KeyC) {
-            self.svc(serde_json::json!({"t": "key", "k": "Copy"}));
+            self.shell_svc(serde_json::json!({"t": "key", "k": "Copy"}));
         }
         if input.super_down() && input.key_pressed(KeyCode::KeyX) {
-            self.svc(serde_json::json!({"t": "key", "k": "Cut"}));
+            self.shell_svc(serde_json::json!({"t": "key", "k": "Cut"}));
         }
         if input.super_down()
             && input.key_pressed(KeyCode::KeyV)
@@ -376,7 +419,7 @@ impl FlatWidget for NoteGame {
             && !text.is_empty()
         {
             self.ensure_text(&text);
-            self.svc(serde_json::json!({"t": "paste", "text": text}));
+            self.shell_svc(serde_json::json!({"t": "paste", "text": text}));
         }
         if let Some(limit) = self.quit_after
             && self.ticks >= limit
@@ -397,7 +440,7 @@ impl FlatWidget for NoteGame {
             self.surface
                 .with_ui(|ui| ui.set_viewport(logical.0 as f32, logical.1 as f32));
             self.call_resize_viewport(logical.0, logical.1)?;
-            self.svc(serde_json::json!({"t": "resize", "w": logical.0, "h": logical.1}));
+            self.shell_svc(serde_json::json!({"t": "resize", "w": logical.0, "h": logical.1}));
             self.dirty = true;
         }
 
@@ -406,7 +449,7 @@ impl FlatWidget for NoteGame {
         self.forward_ime(input);
         let scroll = input.scroll();
         if scroll.y != 0.0 {
-            self.svc(serde_json::json!({"t": "scroll", "dy": scroll.y / scale as f32}));
+            self.shell_svc(serde_json::json!({"t": "scroll", "dy": scroll.y / scale as f32}));
         }
         // Headless script events (windowed runs have none).
         if !self.script.is_empty() {
@@ -440,30 +483,54 @@ impl FlatWidget for NoteGame {
         let shift = input.key_down(KeyCode::ShiftLeft)
             || input.key_down(KeyCode::ShiftRight)
             || self.script_shift;
-        // Note chrome only: editor caret/selection rides svc mouse.
-        // App chrome must not spam note-specific mouse lines — pointer goes
-        // through frame_with_touches + input.pointer instead.
+        // Note chrome: markdown editor caret/selection rides svc mouse.
+        // App chrome: touch/onPress for buttons + shell mouse for TextInput.
         if self.note_chrome {
             if let Some((x, y)) = pos {
                 if pressed_edge && !level_down {
                     // The whole click fit inside this tick: deliver both edges
                     // in order so the guest still runs press → release.
-                    self.svc(serde_json::json!({"t": "mouse", "x": x, "y": y, "d": true, "sh": shift}));
-                    self.svc(serde_json::json!({"t": "mouse", "x": x, "y": y, "d": false, "sh": shift}));
+                    self.shell_svc(serde_json::json!({"t": "mouse", "x": x, "y": y, "d": true, "sh": shift}));
+                    self.shell_svc(serde_json::json!({"t": "mouse", "x": x, "y": y, "d": false, "sh": shift}));
                     self.last_mouse = Some((x, y, false));
                 } else {
                     let m = (x, y, mouse_down);
                     if self.last_mouse != Some(m) {
                         self.last_mouse = Some(m);
-                        self.svc(
+                        self.shell_svc(
                             serde_json::json!({"t": "mouse", "x": x, "y": y, "d": mouse_down, "sh": shift}),
                         );
                     }
                 }
             }
         } else if let Some((x, y)) = pos {
-            // Still track last position for scripted clicks / release fallback.
-            self.last_mouse = Some((x, y, mouse_down));
+            // App chrome: touch/onPress 负责按钮；壳 mouse 供 TextInput caret/选区。
+            if pressed_edge && !level_down {
+                self.shell_svc(serde_json::json!({"t": "mouse", "x": x, "y": y, "d": true, "sh": shift}));
+                self.shell_svc(serde_json::json!({"t": "mouse", "x": x, "y": y, "d": false, "sh": shift}));
+                self.last_mouse = Some((x, y, false));
+            } else {
+                let m = (x, y, mouse_down);
+                if self.last_mouse != Some(m) {
+                    self.last_mouse = Some(m);
+                    self.shell_svc(
+                        serde_json::json!({"t": "mouse", "x": x, "y": y, "d": mouse_down, "sh": shift}),
+                    );
+                }
+            }
+        }
+
+        // External companion → guest before the guest turn. Tag src=companion
+        // and bake unseen CJK so dynamic host text is not tofu.
+        if let Some(bridge) = self.companion.as_mut() {
+            let (lines, became_offline) = bridge.poll();
+            for line in lines {
+                self.ensure_text(&line);
+                self.companion_svc(&line);
+            }
+            if became_offline {
+                self.shell_svc(serde_json::json!({"t": "companion_offline"}));
+            }
         }
 
         // The guest turn (Law 3: exactly one per tick). Clicks are CIRCLE.
@@ -484,7 +551,7 @@ impl FlatWidget for NoteGame {
         }
         self.surface.tick();
 
-        // Guest → host intents.
+        // Guest → host intents (note-local or companion-forwarded).
         for line in self.surface.svc_drain() {
             match serde_json::from_str::<serde_json::Value>(&line) {
                 Ok(v) => match v["t"].as_str() {
@@ -492,6 +559,7 @@ impl FlatWidget for NoteGame {
                     Some("quit") => self.exit = true,
                     Some("menu") => self.guest_menu_open = v["open"].as_bool().unwrap_or(false),
                     Some("copy") => clipboard::copy(v["text"].as_str().unwrap_or_default()),
+                    Some("ensure_text") => self.ensure_text(v["text"].as_str().unwrap_or_default()),
                     Some("caret") => {
                         self.caret_rect = Some((
                             v["x"].as_f64().unwrap_or(0.0) as f32,
@@ -499,6 +567,13 @@ impl FlatWidget for NoteGame {
                             1.0,
                             v["h"].as_f64().unwrap_or(20.0) as f32,
                         ));
+                    }
+                    Some(_) if self.companion.is_some() => {
+                        if let Some(bridge) = self.companion.as_mut()
+                            && let Err(e) = bridge.send_line(&line)
+                        {
+                            log::warn!("note-widget: companion send failed: {e}");
+                        }
                     }
                     other => log::warn!("note-widget: unknown intent {other:?}"),
                 },
@@ -652,6 +727,12 @@ struct Args {
     frames: u64,
     script: Vec<(u64, ScriptEvent)>,
     auto_quit: Option<f32>,
+    /// External companion program (JSON lines on stdio).
+    companion: Option<PathBuf>,
+    /// Extra args for the companion program.
+    companion_args: Vec<String>,
+    /// Working directory for the companion program.
+    companion_cwd: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -669,6 +750,9 @@ fn parse_args() -> Result<Args> {
         frames: 40,
         script: Vec::new(),
         auto_quit: None,
+        companion: None,
+        companion_args: Vec::new(),
+        companion_cwd: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -693,6 +777,11 @@ fn parse_args() -> Result<Args> {
             "--host" => args.host = Some(val("--host")?),
             "--chrome" => args.chrome = ChromeMode::parse(&val("--chrome")?)?,
             "--title" => args.title = Some(val("--title")?),
+            "--companion" => args.companion = Some(PathBuf::from(val("--companion")?)),
+            "--companion-arg" => args.companion_args.push(val("--companion-arg")?),
+            "--companion-cwd" => {
+                args.companion_cwd = Some(PathBuf::from(val("--companion-cwd")?))
+            }
             "--screenshot" => args.screenshot = Some(PathBuf::from(val("--screenshot")?)),
             "--frames" => args.frames = val("--frames")?.parse()?,
             "--click" => {
@@ -847,6 +936,8 @@ fn boot(args: &Args) -> Result<(Guest, UiSurface)> {
         args.density,
     );
     surface.set_identity(host_id, host_abi);
+    // 通用壳通道名：input（框架 connectHostInput）+ note（旧 note app）+ app 输出名。
+    surface.set_svc_allowlist(["input", "note", args.app.as_str()]);
     surface.feed_pak(&pak);
     let guest = Guest::new()?;
     surface.mount(&guest)?;
@@ -888,6 +979,15 @@ fn main() -> Result<()> {
     );
     game.script = std::mem::take(&mut args.script);
     game.quit_after = args.auto_quit.map(|s| (s * 60.0) as u64);
+    if let Some(program) = args.companion.take() {
+        let bridge = companion::CompanionBridge::spawn_simple(
+            program.clone(),
+            std::mem::take(&mut args.companion_args),
+            args.companion_cwd.take(),
+        )?;
+        log::info!("note-widget: companion {}", program.display());
+        game.companion = Some(bridge);
+    }
 
     if let Some(out) = args.screenshot.clone() {
         headless(game, args, &out)
@@ -931,9 +1031,21 @@ fn headless(mut game: NoteGame, args: Args, out: &std::path::Path) -> Result<()>
     game.init(&gpu, OFFSCREEN_FORMAT)?;
     let mut input = Input::default();
     let px = (args.size.0, args.size.1);
-    for _ in 0..args.frames {
+    let has_companion = game.companion.is_some();
+    // companion 子进程冷启动需要墙钟时间；每 30 tick 让出 ~50ms
+    for i in 0..args.frames {
         game.tick(1.0 / 60.0, &input, px, 1.0)?;
         input.end_frame();
+        if has_companion && i % 30 == 29 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    // 再抽几帧，吃掉迟到的 companion 快照并重绘
+    if has_companion {
+        for _ in 0..60 {
+            game.tick(1.0 / 60.0, &input, px, 1.0)?;
+            input.end_frame();
+        }
     }
     let scale = args.density.max(1);
     let (w, h) = (args.size.0 * scale, args.size.1 * scale);

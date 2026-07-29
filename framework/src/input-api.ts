@@ -9,6 +9,8 @@ export {
   focusNode,
   getFocused,
   hitFocusable,
+  isEditableFocused,
+  moveFocusByTab,
   pushFocusController,
   pushFocusGrid,
   pushFocusScope,
@@ -17,3 +19,14 @@ export {
   type FocusGridOptions,
   type FocusScopeOptions,
 } from "./input.ts";
+export {
+  connectCompanion,
+  connectHostInput,
+  connectNoteHost,
+  ensureText,
+  installHostInputPump,
+  openHostChannel,
+  registerEditable,
+  type EditableHandler,
+  type HostInputEvent,
+} from "./host-input.ts";
