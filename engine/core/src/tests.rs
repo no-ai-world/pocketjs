@@ -2901,3 +2901,29 @@ fn stream_golden_fixture_parses() {
     let plane = ui.upload_texture(&init, 16, 16, spec::psm::PSM_T8);
     assert!(ui.update_texture_t8(plane, pal, px));
 }
+
+#[test]
+fn node_local_point_maps_screen_to_node_space() {
+    let mut ui = Ui::new();
+    let panel = abs_box(&mut ui, spec::ROOT_ID, 10.0, 10.0, 100.0, 50.0);
+    let inner = abs_box(&mut ui, panel, 5.0, 5.0, 20.0, 20.0);
+    ui.tick();
+
+    // panel origin (10,10) → local (0,0); interior point → local (10,10).
+    assert_eq!(ui.node_local_point(panel, 10.0, 10.0), 1);
+    assert_eq!(ui.node_local_x(), 0.0);
+    assert_eq!(ui.node_local_y(), 0.0);
+    assert_eq!(ui.node_local_point(panel, 20.0, 20.0), 1);
+    assert_eq!(ui.node_local_x(), 10.0);
+    assert_eq!(ui.node_local_y(), 10.0);
+
+    // inner sits at screen (15,15); (20,20) → inner-local (5,5).
+    assert_eq!(ui.node_local_point(inner, 20.0, 20.0), 1);
+    assert_eq!(ui.node_local_x(), 5.0);
+    assert_eq!(ui.node_local_y(), 5.0);
+
+    // Stale id → failure; readbacks return 0.0.
+    assert_eq!(ui.node_local_point(0x7fff_ffff, 20.0, 20.0), 0);
+    assert_eq!(ui.node_local_x(), 0.0);
+    assert_eq!(ui.node_local_y(), 0.0);
+}

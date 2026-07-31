@@ -26,7 +26,7 @@ describe("desktop-widget host invariants", () => {
   test("stock note-widget has no demo feed API and no app-name chrome inference", () => {
     // 生产 host 不承载 demo fetch-feed；chrome 不靠 note-main 字符串推断
     const src = readFileSync(
-      join(root, "engine/pocket3d/examples/note-widget/src/main.rs"),
+      join(root, "engine/pocket3d/examples/note-widget/src/lib.rs"),
       "utf8",
     );
     expect(src).not.toContain("fetch-feed");
@@ -58,6 +58,20 @@ describe("desktop-widget host invariants", () => {
     expect(src).toContain("stderr(Stdio::inherit())");
   });
 
+  test("app-widget is an independent app-only package", () => {
+    const cargo = readFileSync(
+      join(root, "engine/pocket3d/examples/app-widget/Cargo.toml"),
+      "utf8",
+    );
+    const main = readFileSync(
+      join(root, "engine/pocket3d/examples/app-widget/src/main.rs"),
+      "utf8",
+    );
+    expect(cargo).toContain('name = "app-widget"');
+    expect(cargo).toContain('note-widget = { path = "../note-widget" }');
+    expect(main).toContain("note_widget::run_app()");
+  });
+
   test("framework exposes TextInput, text-edit, and host-input split", () => {
     const pkg = readFileSync(join(root, "package.json"), "utf8");
     expect(pkg).toContain('"./text-edit"');
@@ -84,7 +98,7 @@ describe("desktop-widget host invariants", () => {
   test("docs and shell expose explicit transparent degrade", () => {
     // 文档与 API 承认 Windows 可能降到 opaque
     const docs = readFileSync(join(root, "docs/WIDGET.md"), "utf8");
-    expect(docs).toContain("Stock `note-widget` is the desktop App Shell");
+    expect(docs).toContain("Stock `app-widget` is the generic desktop App Shell");
     expect(docs).toContain("Transparent may degrade on Windows");
     expect(docs).toContain("display_transparent()");
 

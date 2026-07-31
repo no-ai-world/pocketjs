@@ -346,6 +346,18 @@ pub extern "C" fn ui_hit_test(x: f32, y: f32) -> i32 {
     ui().hit_test(x, y)
 }
 
+pub extern "C" fn ui_node_local_point(id: i32, x: f32, y: f32) -> i32 {
+    ui().node_local_point(id, x, y)
+}
+
+pub extern "C" fn ui_node_local_x() -> f32 {
+    ui().node_local_x()
+}
+
+pub extern "C" fn ui_node_local_y() -> f32 {
+    ui().node_local_y()
+}
+
 #[no_mangle]
 pub extern "C" fn ui_set_cursor(texture: i32, hot_x: f32, hot_y: f32, width: f32, height: f32) {
     ui().set_cursor(texture, hot_x, hot_y, width, height);

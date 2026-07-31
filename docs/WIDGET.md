@@ -150,12 +150,12 @@ one `render_words_scaled` pass on dirty frames. It exercises everything the
   against the host OS's stock target (`macos-widget` on macOS,
   `windows-widget` on Windows) — density and features come from the profile,
   not flags.
-- **Stock `note-widget` is the desktop App Shell.** Default `--chrome app`
-  is an ordinary OS window (title bar + edges) for any `*-main` bundle:
-  `bun run app-widget form` or
-  `cargo run -p note-widget -- --chrome app --app form-main`. Pocket Note
-  must pass `--chrome note` (as `bun run note` does) for the ambient
-  sticky. Do not infer chrome from the app output name.
+- **Stock `app-widget` is the generic desktop App Shell.** It always uses
+  `--chrome app` and opens an ordinary OS window (title bar + edges) for any
+  `*-main` bundle: `bun run app-widget form` or
+  `cargo run -p app-widget -- --app form-main`. It does not
+  expose Pocket Note document/save/menu semantics. Pocket Note uses the
+  separate `note-widget` binary with `--chrome note` (as `bun run note` does).
 - **Pointer paths split by chrome.** Note chrome keeps the historical svc
   `{t:"mouse"}` bridge for the markdown editor. App chrome packs the OS
   pointer as a wide touch contact + CIRCLE for `onPress`, and also emits

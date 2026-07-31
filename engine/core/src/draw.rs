@@ -703,6 +703,46 @@ pub fn hit_test(tree: &Tree, styles: &StyleTable, screen: (f32, f32), x: f32, y:
     hit
 }
 
+/// Screen point → local point relative to node `id`'s border box.
+/// Composes the same per-node world affine as `hit_test` (2D only; perspective
+/// subtrees are not point-resolvable per node). Returns None when `id` is
+/// stale/detached, `display:none`, or the transform is non-invertible.
+pub fn node_local_point(
+    tree: &Tree,
+    styles: &StyleTable,
+    _screen: (f32, f32),
+    id: i32,
+    px: f32,
+    py: f32,
+) -> Option<(f32, f32)> {
+    // Collect slot path root → target, validating generations and liveness.
+    let mut path: Vec<u32> = Vec::new();
+    let mut cur = id;
+    while cur != 0 {
+        let (gen, slot) = crate::tree::split_id(cur);
+        let node = tree.slots.get(slot as usize)?;
+        if !node.alive || node.generation != gen {
+            return None;
+        }
+        path.push(slot);
+        if cur == spec::ROOT_ID {
+            break;
+        }
+        cur = node.parent;
+    }
+    path.reverse();
+    let mut world = Affine::IDENTITY;
+    for slot in path {
+        let node = &tree.slots[slot as usize];
+        let r = style::resolve(node, styles, true);
+        if r.display == spec::Display::None as u8 {
+            return None;
+        }
+        world = world.then(&local_affine(&node.layout, &r));
+    }
+    local_point(&world, px, py)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn hit_walk(
     tree: &Tree,

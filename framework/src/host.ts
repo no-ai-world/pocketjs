@@ -88,6 +88,10 @@ export interface HostOps {
   /** Topmost node id at a logical point (paint-order hit testing; pure
    *  layout containers pass through — see spec op 27). 0 = none. */
   hitTest?(x: number, y: number): number;
+  /** Screen point → local point relative to node `id`'s border box.
+   *  Returns null when the host predates the op or `id` is stale / has a
+   *  non-invertible transform. Used by TextInput to place the caret on click. */
+  nodeLocalPoint?(id: number, x: number, y: number): { x: number; y: number } | null;
   /** Bind the cursor sprite: an uploaded texture drawn topmost every frame,
    *  offset by its hotspot; never laid out, never hit-tested. tex < 0 hides
    *  it; w/h <= 0 draw at the texture's own pixel size. */

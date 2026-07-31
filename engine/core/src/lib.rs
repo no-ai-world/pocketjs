@@ -255,6 +255,10 @@ pub struct Ui {
     /// The highlight box as actually drawn last frame — glides toward
     /// `inspect_rect` (draw::build lerps it); purely visual state.
     inspect_drawn: Option<(f32, f32, f32, f32)>,
+    /// Last `node_local_point` result (screen → local), staged for the two
+    /// `ui_node_local_x/y` readbacks. `None` when the last call was stale or
+    /// non-invertible.
+    last_local_point: Option<(f32, f32)>,
     paused: bool,
     step_pending: bool,
 }
@@ -302,6 +306,7 @@ impl Ui {
             inspect_id: 0,
             inspect_rect: None,
             inspect_drawn: None,
+            last_local_point: None,
             paused: false,
             step_pending: false,
         }
@@ -838,6 +843,35 @@ impl Ui {
             layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
         }
         draw::hit_test(&self.tree, &self.styles, self.layout.viewport, x, y)
+    }
+
+    /// Screen point → local point relative to node `id`'s border box.
+    /// Returns 1 and stages the result for `node_local_x/y`; 0 when `id` is
+    /// stale/detached/non-invertible (readbacks then return 0.0).
+    pub fn node_local_point(&mut self, id: i32, x: f32, y: f32) -> i32 {
+        if self.layout.needs() {
+            layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
+        }
+        match draw::node_local_point(&self.tree, &self.styles, self.layout.viewport, id, x, y) {
+            Some((lx, ly)) => {
+                self.last_local_point = Some((lx, ly));
+                1
+            }
+            None => {
+                self.last_local_point = None;
+                0
+            }
+        }
+    }
+
+    /// Last `node_local_point` local x (0.0 when the last call was invalid).
+    pub fn node_local_x(&self) -> f32 {
+        self.last_local_point.map(|(x, _)| x).unwrap_or(0.0)
+    }
+
+    /// Last `node_local_point` local y (0.0 when the last call was invalid).
+    pub fn node_local_y(&self) -> f32 {
+        self.last_local_point.map(|(_, y)| y).unwrap_or(0.0)
     }
 
     /// Bind the virtual cursor sprite (spec op setCursor): an uploaded

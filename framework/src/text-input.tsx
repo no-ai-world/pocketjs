@@ -302,7 +302,11 @@ export function TextInput(props: TextInputProps): SolidJSX.Element {
     if (p.disabled) return;
     const n = node();
     if (!n) return;
-    const local = p.toLocal?.(x, y);
+    // App-supplied toLocal wins; otherwise ask the host to map the screen
+    // point into this node's local space (caret placement on click/drag).
+    const local = p.toLocal
+      ? p.toLocal(x, y)
+      : getOps().nodeLocalPoint?.(n.id, x, y) ?? undefined;
     if (down && !prevDown) {
       focusNode(n);
       setFocused(true);

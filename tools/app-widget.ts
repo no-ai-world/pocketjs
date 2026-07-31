@@ -36,11 +36,10 @@ function defaultDesktopWidgetTarget(): "macos-widget" | "windows-widget" {
   );
 }
 
-const appName = rawArgs.find((a) => !a.startsWith("--")) ?? "form";
-const filtered = rawArgs.filter((a) => a !== appName);
 const targetOverride = takeFlag("--target");
 const title = takeFlag("--title");
-const pass = filtered.filter((f) => f !== "--target" && f !== "--title");
+const appName = rawArgs.find((a) => !a.startsWith("--")) ?? "form";
+const pass = rawArgs.filter((a) => a !== appName);
 
 const target = (targetOverride ?? defaultDesktopWidgetTarget()) as
   | "macos-widget"
@@ -73,9 +72,9 @@ await Bun.write(planPath, JSON.stringify(resolution.plan, null, 2) + "\n");
 
 const engineRoot = join(root, "engine");
 await $`bun tools/build.ts --plan=${planPath} --project-root=${root}`.cwd(root);
-await $`cargo build --release -p note-widget`.cwd(engineRoot);
+await $`cargo build --release -p app-widget`.cwd(engineRoot);
 
-const binName = platform() === "win32" ? "note-widget.exe" : "note-widget";
+const binName = platform() === "win32" ? "app-widget.exe" : "app-widget";
 const bin = join(engineRoot, "target/release", binName);
 const env = {
   ...process.env,

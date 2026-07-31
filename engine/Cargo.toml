@@ -21,6 +21,7 @@ members = [
     "pocket3d/crates/pocket3d-cook",
     "pocket3d/examples/handheld",
     "pocket3d/examples/note-widget",
+    "pocket3d/examples/app-widget",
     "pocket3d/examples/uihost",
 ]
 exclude = [

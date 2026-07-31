@@ -199,6 +199,23 @@ pub extern "C" fn ui_hit_test(x: f32, y: f32) -> i32 {
     ui().hit_test(x, y)
 }
 
+/// Screen point → local point of node `id`. Returns 1 on success (stage the
+/// result for `ui_node_local_x/y`); 0 when `id` is stale/detached/non-invertible.
+#[no_mangle]
+pub extern "C" fn ui_node_local_point(id: i32, x: f32, y: f32) -> i32 {
+    ui().node_local_point(id, x, y)
+}
+
+#[no_mangle]
+pub extern "C" fn ui_node_local_x() -> f32 {
+    ui().node_local_x()
+}
+
+#[no_mangle]
+pub extern "C" fn ui_node_local_y() -> f32 {
+    ui().node_local_y()
+}
+
 #[no_mangle]
 pub extern "C" fn ui_set_cursor(tex: i32, hot_x: f32, hot_y: f32, w: f32, h: f32) {
     ui().set_cursor(tex, hot_x, hot_y, w, h)
