@@ -933,7 +933,7 @@ impl FlatWidget for NoteGame {
         // The guest turn (Law 3: exactly one per tick). Pointer events are
         // also delivered over svc so TextInput can place its caret; ordinary
         // app targets additionally use the pointer wire form for Focusable.
-        let buttons = pointer_buttons(pointer_down, pointer_down || guest_pointer_pos.is_some());
+        let buttons = pointer_buttons(pointer_down);
         if let Some((x, y)) = guest_pointer_pos {
             self.guest
                 .frame_with_touches(buttons, 0x8080, &[pack_pointer_position(x, y)])?;
@@ -1095,11 +1095,9 @@ fn last_mouse_release(
         .map(|(x, y, _)| (x, y))
 }
 
-/// Generate the guest press button only with an active pointer contact.
-fn pointer_buttons(mouse_down: bool, contact_active: bool) -> u32 {
-    (mouse_down && contact_active)
-        .then_some(BTN_CIRCLE)
-        .unwrap_or(0)
+/// Generate the guest press button from the physical pointer level.
+fn pointer_buttons(mouse_down: bool) -> u32 {
+    mouse_down.then_some(BTN_CIRCLE).unwrap_or(0)
 }
 
 fn fnv1a64(words: &[u32]) -> u64 {
@@ -1793,10 +1791,26 @@ mod tests {
     }
 
     #[test]
-    fn pointer_buttons_require_an_active_contact() {
-        assert_eq!(pointer_buttons(true, true), BTN_CIRCLE);
-        assert_eq!(pointer_buttons(true, false), 0);
-        assert_eq!(pointer_buttons(false, false), 0);
+    fn pointer_buttons_preserve_a_held_press_without_a_contact() {
+        assert_eq!(pointer_buttons(true), BTN_CIRCLE);
+        assert_eq!(pointer_buttons(false), 0);
+    }
+
+    #[test]
+    fn pointer_pulse_keeps_a_held_press_after_cursor_leave() {
+        // Preserve physical button ownership while the cursor has no coordinate.
+        let mut pulse = PointerPulse::default();
+        let press = (10.0, 20.0);
+        pulse.queue(&[], Some(press));
+        assert_eq!(pulse.next(true, Some(press), false), (true, Some(press)));
+
+        let (pointer_down, position) = pulse.next(true, None, false);
+        assert_eq!((pointer_down, position), (true, None));
+        assert_eq!(pointer_buttons(pointer_down), BTN_CIRCLE);
+
+        let (pointer_down, position) = pulse.next(false, None, true);
+        assert_eq!((pointer_down, position), (false, None));
+        assert_eq!(pointer_buttons(pointer_down), 0);
     }
 
     #[test]

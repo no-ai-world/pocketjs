@@ -272,6 +272,38 @@ describe("desktop pointer contact → onPress", () => {
     expect(presses).toBe(1);
   });
 
+  test("pointer leave cannot retarget a held desktop press on re-entry", () => {
+    // 同一物理按住离窗后重入其他控件，不能改写原始 press owner。
+    let aPresses = 0;
+    let bPresses = 0;
+    const a = mk(10, root, {
+      focusable: true,
+      onPress: () => {
+        aPresses += 1;
+      },
+    });
+    const b = mk(11, root, {
+      focusable: true,
+      onPress: () => {
+        bPresses += 1;
+      },
+    });
+    host.hitResult = a.id;
+    __setTouches([__packTouchDesktop(60, 60)]);
+    handleFrame(0);
+    handleFrame(BTN.CIRCLE);
+
+    clearPointerHover();
+    __resetTouches();
+    handleFrame(BTN.CIRCLE);
+
+    host.hitResult = b.id;
+    __setTouches([__packTouchDesktop(80, 60)]);
+    handleFrame(BTN.CIRCLE);
+    handleFrame(0);
+    expect([aPresses, bPresses]).toEqual([0, 0]);
+  });
+
   test("programmatic blur cancels a held desktop press", () => {
     let presses = 0;
     const button = mk(8, root, {
