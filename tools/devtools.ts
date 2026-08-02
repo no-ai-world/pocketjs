@@ -19,10 +19,11 @@ import { $ } from "bun";
 import { existsSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { startDevServer, demoManifest } from "../hosts/web/server.ts";
 import { startBridge, type Bridge } from "./devtools-bridge.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 // ---- args -------------------------------------------------------------------
 

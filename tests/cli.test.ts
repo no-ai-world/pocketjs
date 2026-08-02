@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fileURLToPath(new URL("..", import.meta.url));
 const cli = join(root, "tools/cli/bin.mjs");
 const temporary: string[] = [];
 
@@ -89,8 +90,8 @@ describe("published PocketJS CLI", () => {
       const result = runCli(cwd, fixture.cliArgs, { POCKET_CLI_TEST_LOG: log });
       expect(result.exitCode, `${fixture.cliArgs.join(" ")}\n${result.stderr}`).toBe(0);
       const recorded = JSON.parse(readFileSync(log, "utf8"));
-      expect(basename(new URL(recorded.script).pathname)).toBe(fixture.script);
+      expect(basename(fileURLToPath(new URL(recorded.script)))).toBe(fixture.script);
       expect(recorded.args).toEqual(fixture.args);
     }
-  });
+  }, 60_000);
 });

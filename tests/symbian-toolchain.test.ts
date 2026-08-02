@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   SYMBIAN_DOWNLOADS,
   SYMBIAN_RUNTIME_DOWNLOADS,
@@ -30,7 +31,7 @@ import {
 } from "../tools/symbian-toolchain.ts";
 import { withArtifactLock } from "../tools/psp-toolchain.ts";
 
-const repository = new URL("..", import.meta.url).pathname;
+const repository = fileURLToPath(new URL("..", import.meta.url));
 const temporary: string[] = [];
 afterEach(() => {
   for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true });

@@ -110,6 +110,12 @@ finger is currently down: `touches()` returns an empty snapshot in that state.
 An application can put touch in `enhances` and keep its button fallback for
 PSP, or put it in `requires` when touch is fundamental to the product.
 
+`input.pointer` is a different API: the host provides one native absolute
+pointer position and the CIRCLE bit carries its press/release edges. The
+framework exposes that position through `pointerPosition()` and resolves
+hover focus plus `onPress`; it never aliases the mouse position into the
+front-panel `touches()` snapshot.
+
 `input.cursor` follows the same rule for the [virtual
 cursor](/docs/input-focus/#virtual-cursor): the host implements hit testing
 and the cursor sprite (spec ops 27–29), and the framework synthesizes a

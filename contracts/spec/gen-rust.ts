@@ -7,6 +7,8 @@
 // spec.ts. Keep this generator free of anything non-deterministic (no dates,
 // no env, no object-key sorting surprises — insertion order only).
 
+import { fileURLToPath } from "node:url";
+
 import {
   ANALOG_CENTER,
   ANIMATABLE,
@@ -397,7 +399,7 @@ export function generateRust(): string {
 }
 
 if (import.meta.main) {
-  const out = new URL("../../engine/core/src/spec.rs", import.meta.url).pathname;
+  const out = fileURLToPath(new URL("../../engine/core/src/spec.rs", import.meta.url));
   await Bun.write(out, generateRust());
   console.log(`wrote ${out}`);
 }

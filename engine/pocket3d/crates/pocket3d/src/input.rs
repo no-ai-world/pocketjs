@@ -1,7 +1,7 @@
 //! Keyboard/mouse state, fed by winit events or injected synthetically
 //! (headless tests drive the same struct).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use glam::Vec2;
 use winit::event::{
@@ -47,12 +47,25 @@ pub enum EditKey {
     Escape,
 }
 
+/// A completed in-window pointer interaction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MouseClick {
+    pub press: Vec2,
+    pub release: Vec2,
+}
+
 #[derive(Default)]
 pub struct Input {
     down: HashSet<KeyCode>,
     pressed: HashSet<KeyCode>,
-    mouse_down: HashSet<u8>,
-    mouse_pressed: HashSet<u8>,
+    /// Current held buttons and their accepted press coordinates.
+    mouse_down: HashMap<u8, Option<Vec2>>,
+    /// Ordered raw press snapshots for this simulation turn.
+    mouse_pressed: HashMap<u8, Vec<Option<Vec2>>>,
+    /// Completed in-window clicks, kept separately from still-held presses.
+    mouse_clicks: HashMap<u8, Vec<MouseClick>>,
+    /// Buttons whose active press released after the cursor left the window.
+    mouse_released_outside: HashSet<u8>,
     mouse_delta: Vec2,
     cursor: Option<Vec2>,
     edits: Vec<EditKey>,
@@ -66,9 +79,16 @@ pub struct Input {
     /// One-turn cancellation edge raised by focus loss or an explicit input
     /// reset. This is distinct from a normal button release.
     interaction_cancelled: bool,
-    /// A super/command chord is held — edit consumers usually skip
-    /// `Char` events while true (they are shortcuts, not typing).
+    /// One-turn edge raised when a previously unfocused window regains focus.
+    interaction_restored: bool,
+    /// Whether the last focus event left the window unfocused.
+    window_focus_lost: bool,
+    /// The platform's command modifier is held (Command on macOS, Windows
+    /// key elsewhere). Kept separate from Control because macOS text fields
+    /// use Command while Windows text fields use Control.
     super_down: bool,
+    /// Control is held; Windows uses it for standard editing shortcuts.
+    control_down: bool,
 }
 
 fn button_id(b: MouseButton) -> u8 {
@@ -84,6 +104,10 @@ fn button_id(b: MouseButton) -> u8 {
 
 impl Input {
     pub fn on_window_event(&mut self, event: &WindowEvent) {
+        // Maintain window-scoped input state.
+        if self.window_focus_lost && !matches!(event, WindowEvent::Focused(_)) {
+            return;
+        }
         match event {
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
@@ -118,17 +142,24 @@ impl Input {
                             self.super_down = true;
                             None
                         }
+                        Key::Named(NamedKey::Control) => {
+                            self.control_down = true;
+                            None
+                        }
                         _ => None,
                     };
                     if let Some(k) = named {
                         self.edits.push(k);
                     } else if let Some(text) = &event.text {
-                        self.edits.extend(
-                            text.chars().filter(|c| !c.is_control()).map(EditKey::Char),
-                        );
+                        self.edits
+                            .extend(text.chars().filter(|c| !c.is_control()).map(EditKey::Char));
                     }
-                } else if matches!(&event.logical_key, Key::Named(NamedKey::Super)) {
-                    self.super_down = false;
+                } else {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Super) => self.super_down = false,
+                        Key::Named(NamedKey::Control) => self.control_down = false,
+                        _ => {}
+                    }
                 }
             }
             WindowEvent::Ime(ime) => {
@@ -155,12 +186,31 @@ impl Input {
                 let id = button_id(*button);
                 match state {
                     ElementState::Pressed => {
-                        if self.mouse_down.insert(id) {
-                            self.mouse_pressed.insert(id);
+                        if let Some(position) = self.cursor {
+                            if !self.mouse_down.contains_key(&id) {
+                                self.mouse_down.insert(id, Some(position));
+                                self.mouse_pressed
+                                    .entry(id)
+                                    .or_default()
+                                    .push(Some(position));
+                            }
+                        } else {
+                            log::warn!(
+                                "pocket3d: dropping mouse press without an in-window cursor snapshot"
+                            );
                         }
                     }
                     ElementState::Released => {
-                        self.mouse_down.remove(&id);
+                        if let Some(Some(press)) = self.mouse_down.remove(&id) {
+                            if let Some(release) = self.cursor {
+                                self.mouse_clicks
+                                    .entry(id)
+                                    .or_default()
+                                    .push(MouseClick { press, release });
+                            } else {
+                                self.mouse_released_outside.insert(id);
+                            }
+                        }
                     }
                 }
             }
@@ -168,7 +218,16 @@ impl Input {
                 self.cursor = Some(Vec2::new(position.x as f32, position.y as f32));
             }
             WindowEvent::CursorLeft { .. } => self.cursor = None,
-            WindowEvent::Focused(false) => self.clear(),
+            WindowEvent::Focused(false) => {
+                self.window_focus_lost = true;
+                self.clear();
+            }
+            WindowEvent::Focused(true) => {
+                if self.window_focus_lost {
+                    self.window_focus_lost = false;
+                    self.interaction_restored = true;
+                }
+            }
             _ => {}
         }
     }
@@ -179,6 +238,10 @@ impl Input {
     }
 
     pub fn on_device_event(&mut self, event: &DeviceEvent) {
+        // Accumulate device motion only while the window owns input.
+        if self.window_focus_lost {
+            return;
+        }
         if let DeviceEvent::MouseMotion { delta } = event {
             self.mouse_delta += Vec2::new(delta.0 as f32, delta.1 as f32);
         }
@@ -186,10 +249,14 @@ impl Input {
 
     /// Forget everything held (focus loss, mode switches).
     pub fn clear(&mut self) {
+        // Clear focus-sensitive input state, including the last cursor point.
         self.down.clear();
         self.pressed.clear();
         self.mouse_down.clear();
         self.mouse_pressed.clear();
+        self.mouse_clicks.clear();
+        self.mouse_released_outside.clear();
+        self.cursor = None;
         self.mouse_delta = Vec2::ZERO;
         self.edits.clear();
         self.ime.clear();
@@ -197,13 +264,17 @@ impl Input {
         self.scroll_started = false;
         self.scroll_ended = true;
         self.interaction_cancelled = true;
+        self.interaction_restored = false;
         self.super_down = false;
+        self.control_down = false;
     }
 
     /// Call once per simulation turn, after game logic consumed edge state.
     pub fn end_frame(&mut self) {
         self.pressed.clear();
         self.mouse_pressed.clear();
+        self.mouse_clicks.clear();
+        self.mouse_released_outside.clear();
         self.mouse_delta = Vec2::ZERO;
         self.edits.clear();
         self.ime.clear();
@@ -211,6 +282,7 @@ impl Input {
         self.scroll_started = false;
         self.scroll_ended = false;
         self.interaction_cancelled = false;
+        self.interaction_restored = false;
     }
 
     /// This frame's text-editing keystrokes, in press order (repeats
@@ -249,9 +321,20 @@ impl Input {
         self.interaction_cancelled
     }
 
+    /// True for one simulation turn when a previously unfocused window regains focus.
+    pub fn interaction_restored(&self) -> bool {
+        self.interaction_restored
+    }
+
     /// A super/command key is currently held.
     pub fn super_down(&self) -> bool {
         self.super_down
+    }
+
+    /// A platform editing shortcut modifier is held: Command on macOS or
+    /// Control on Windows/Linux.
+    pub fn shortcut_down(&self) -> bool {
+        self.super_down || self.control_down
     }
 
     pub fn key_down(&self, code: KeyCode) -> bool {
@@ -262,10 +345,42 @@ impl Input {
         self.pressed.contains(&code)
     }
     pub fn mouse_button_down(&self, button: MouseButton) -> bool {
-        self.mouse_down.contains(&button_id(button))
+        // Report whether this button currently owns a physical/synthetic press.
+        self.mouse_down.contains_key(&button_id(button))
+    }
+    pub fn mouse_button_down_position(&self, button: MouseButton) -> Option<Vec2> {
+        // Return the accepted coordinate that started the current held press.
+        self.mouse_down.get(&button_id(button)).copied().flatten()
     }
     pub fn mouse_button_pressed(&self, button: MouseButton) -> bool {
-        self.mouse_pressed.contains(&button_id(button))
+        // Report whether this turn observed a press edge.
+        self.mouse_button_press_count(button) > 0
+    }
+    pub fn mouse_button_press_count(&self, button: MouseButton) -> u32 {
+        // Count this turn's ordered press snapshots.
+        self.mouse_pressed
+            .get(&button_id(button))
+            .map_or(0, |presses| presses.len() as u32)
+    }
+    pub fn mouse_button_press_positions(&self, button: MouseButton) -> Vec<Vec2> {
+        // Return coordinate-qualified raw press snapshots in arrival order.
+        self.mouse_pressed
+            .get(&button_id(button))
+            .into_iter()
+            .flatten()
+            .filter_map(|position| *position)
+            .collect()
+    }
+    pub fn mouse_button_clicks(&self, button: MouseButton) -> Vec<MouseClick> {
+        // Return completed in-window clicks in their original arrival order.
+        self.mouse_clicks
+            .get(&button_id(button))
+            .cloned()
+            .unwrap_or_default()
+    }
+    pub fn mouse_button_released_outside(&self, button: MouseButton) -> bool {
+        // Report the one-turn cancellation edge for a release outside the window.
+        self.mouse_released_outside.contains(&button_id(button))
     }
     pub fn mouse_delta(&self) -> Vec2 {
         self.mouse_delta
@@ -283,14 +398,31 @@ impl Input {
     }
 
     pub fn inject_mouse_button(&mut self, button: MouseButton, down: bool) {
+        // Record one synthetic press while preserving its optional cursor snapshot.
         let id = button_id(button);
         if down {
-            if self.mouse_down.insert(id) {
-                self.mouse_pressed.insert(id);
+            if !self.mouse_down.contains_key(&id) {
+                self.mouse_down.insert(id, self.cursor);
+                self.mouse_pressed.entry(id).or_default().push(self.cursor);
             }
-        } else {
-            self.mouse_down.remove(&id);
+        } else if let Some(Some(press)) = self.mouse_down.remove(&id)
+            && let Some(release) = self.cursor
+        {
+            self.mouse_clicks
+                .entry(id)
+                .or_default()
+                .push(MouseClick { press, release });
         }
+    }
+
+    /// Cancel a synthetic mouse gesture without leaving a press edge.
+    pub fn cancel_mouse_button(&mut self, button: MouseButton) {
+        // Remove both held and edge state for a gesture claimed by the shell.
+        let id = button_id(button);
+        self.mouse_down.remove(&id);
+        self.mouse_pressed.remove(&id);
+        self.mouse_clicks.remove(&id);
+        self.mouse_released_outside.remove(&id);
     }
 
     pub fn inject_mouse_delta(&mut self, dx: f32, dy: f32) {
@@ -299,6 +431,7 @@ impl Input {
 
     /// Place the cursor at a window-pixel position (scripted picking).
     pub fn inject_cursor(&mut self, x: f32, y: f32) {
+        // Set the synthetic pointer position.
         self.cursor = Some(Vec2::new(x, y));
     }
 
@@ -326,15 +459,29 @@ mod tests {
     fn end_frame_consumes_edges_but_preserves_held_state() {
         let mut input = Input::default();
         input.inject_key(KeyCode::KeyX, true);
+        input.inject_cursor(12.0, 24.0);
         input.inject_mouse_button(MouseButton::Left, true);
         assert!(input.key_pressed(KeyCode::KeyX));
         assert!(input.mouse_button_pressed(MouseButton::Left));
+        assert_eq!(
+            input.mouse_button_press_positions(MouseButton::Left),
+            vec![Vec2::new(12.0, 24.0)]
+        );
 
         input.end_frame();
         assert!(!input.key_pressed(KeyCode::KeyX));
         assert!(!input.mouse_button_pressed(MouseButton::Left));
         assert!(input.key_down(KeyCode::KeyX));
         assert!(input.mouse_button_down(MouseButton::Left));
+        assert_eq!(
+            input.mouse_button_down_position(MouseButton::Left),
+            Some(Vec2::new(12.0, 24.0))
+        );
+        assert!(
+            input
+                .mouse_button_press_positions(MouseButton::Left)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -347,12 +494,257 @@ mod tests {
         });
         input.on_window_event(&WindowEvent::MouseWheel {
             device_id: winit::event::DeviceId::dummy(),
-            delta: MouseScrollDelta::PixelDelta(
-                winit::dpi::PhysicalPosition::new(3.25, -7.5),
-            ),
+            delta: MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(3.25, -7.5)),
             phase: winit::event::TouchPhase::Moved,
         });
         assert_eq!(input.scroll(), Vec2::new(33.25, -47.5));
+    }
+
+    #[test]
+    fn mouse_press_snapshots_preserve_injected_click_order() {
+        let mut input = Input::default();
+        input.inject_cursor(12.0, 24.0);
+        input.inject_mouse_button(MouseButton::Left, true);
+        input.inject_mouse_button(MouseButton::Left, false);
+        input.inject_cursor(30.0, 40.0);
+        input.inject_mouse_button(MouseButton::Left, true);
+        input.inject_mouse_button(MouseButton::Left, false);
+        assert_eq!(input.mouse_button_press_count(MouseButton::Left), 2);
+        assert_eq!(
+            input.mouse_button_press_positions(MouseButton::Left),
+            vec![Vec2::new(12.0, 24.0), Vec2::new(30.0, 40.0)]
+        );
+        input.end_frame();
+        assert_eq!(input.mouse_button_press_count(MouseButton::Left), 0);
+        assert!(
+            input
+                .mouse_button_press_positions(MouseButton::Left)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn window_press_snapshots_preserve_distinct_click_positions() {
+        let mut input = Input::default();
+        for (x, y) in [(12.0, 24.0), (30.0, 40.0)] {
+            input.on_window_event(&WindowEvent::CursorMoved {
+                device_id: winit::event::DeviceId::dummy(),
+                position: winit::dpi::PhysicalPosition::new(x, y),
+            });
+            input.on_window_event(&WindowEvent::MouseInput {
+                device_id: winit::event::DeviceId::dummy(),
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+            });
+            input.on_window_event(&WindowEvent::MouseInput {
+                device_id: winit::event::DeviceId::dummy(),
+                state: ElementState::Released,
+                button: MouseButton::Left,
+            });
+        }
+        assert_eq!(
+            input.mouse_button_press_positions(MouseButton::Left),
+            vec![Vec2::new(12.0, 24.0), Vec2::new(30.0, 40.0)]
+        );
+    }
+
+    #[test]
+    fn completed_clicks_preserve_press_and_release_coordinates() {
+        let mut input = Input::default();
+        input.on_window_event(&WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(12.0, 24.0),
+        });
+        input.on_window_event(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+        });
+        input.on_window_event(&WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(30.0, 40.0),
+        });
+        input.on_window_event(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Released,
+            button: MouseButton::Left,
+        });
+        assert_eq!(
+            input.mouse_button_clicks(MouseButton::Left),
+            vec![MouseClick {
+                press: Vec2::new(12.0, 24.0),
+                release: Vec2::new(30.0, 40.0),
+            }]
+        );
+    }
+
+    #[test]
+    fn outside_release_cancels_the_click_edge() {
+        let mut input = Input::default();
+        input.on_window_event(&WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(12.0, 24.0),
+        });
+        input.on_window_event(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+        });
+        input.on_window_event(&WindowEvent::CursorLeft {
+            device_id: winit::event::DeviceId::dummy(),
+        });
+        input.on_window_event(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Released,
+            button: MouseButton::Left,
+        });
+        assert!(input.mouse_button_clicks(MouseButton::Left).is_empty());
+        assert!(input.mouse_button_released_outside(MouseButton::Left));
+        input.end_frame();
+        assert!(!input.mouse_button_released_outside(MouseButton::Left));
+    }
+
+    #[test]
+    fn cursor_leave_preserves_the_accepted_press_snapshot() {
+        let mut input = Input::default();
+        input.on_window_event(&WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(12.0, 24.0),
+        });
+        input.on_window_event(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+        });
+        input.on_window_event(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Released,
+            button: MouseButton::Left,
+        });
+        input.on_window_event(&WindowEvent::CursorLeft {
+            device_id: winit::event::DeviceId::dummy(),
+        });
+        assert_eq!(input.cursor(), None);
+        assert_eq!(
+            input.mouse_button_press_positions(MouseButton::Left),
+            vec![Vec2::new(12.0, 24.0)]
+        );
+
+        input.end_frame();
+        assert!(
+            input
+                .mouse_button_press_positions(MouseButton::Left)
+                .is_empty()
+        );
+        input.on_window_event(&WindowEvent::Focused(false));
+        assert!(
+            input
+                .mouse_button_press_positions(MouseButton::Left)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn press_after_cursor_leave_waits_for_reentry() {
+        let mut input = Input::default();
+        input.on_window_event(&WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(12.0, 24.0),
+        });
+        input.on_window_event(&WindowEvent::CursorLeft {
+            device_id: winit::event::DeviceId::dummy(),
+        });
+        input.on_window_event(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+        });
+        assert_eq!(input.mouse_button_press_count(MouseButton::Left), 0);
+
+        input.on_window_event(&WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(30.0, 40.0),
+        });
+        input.on_window_event(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+        });
+        assert_eq!(input.mouse_button_press_count(MouseButton::Left), 1);
+        assert_eq!(
+            input.mouse_button_press_positions(MouseButton::Left),
+            vec![Vec2::new(30.0, 40.0)]
+        );
+    }
+
+    #[test]
+    fn focus_restore_requires_a_fresh_cursor_snapshot() {
+        let mut input = Input::default();
+        input.on_window_event(&WindowEvent::Focused(false));
+        input.on_window_event(&WindowEvent::CursorLeft {
+            device_id: winit::event::DeviceId::dummy(),
+        });
+        input.on_window_event(&WindowEvent::Focused(true));
+        input.on_window_event(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+        });
+        assert_eq!(input.mouse_button_press_count(MouseButton::Left), 0);
+
+        input.on_window_event(&WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(30.0, 40.0),
+        });
+        input.on_window_event(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+        });
+        assert_eq!(input.mouse_button_press_count(MouseButton::Left), 1);
+    }
+
+    #[test]
+    fn late_mouse_input_is_dropped_until_focus_returns() {
+        let mut input = Input::default();
+        input.on_window_event(&WindowEvent::Focused(false));
+        input.on_window_event(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+        });
+        assert!(!input.mouse_button_down(MouseButton::Left));
+        assert_eq!(input.mouse_button_press_count(MouseButton::Left), 0);
+
+        input.on_window_event(&WindowEvent::Focused(true));
+        input.on_window_event(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+        });
+        assert!(!input.mouse_button_down(MouseButton::Left));
+        assert_eq!(input.mouse_button_press_count(MouseButton::Left), 0);
+
+        input.on_window_event(&WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(30.0, 40.0),
+        });
+        input.on_window_event(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+        });
+        assert!(input.mouse_button_down(MouseButton::Left));
+        assert_eq!(input.mouse_button_press_count(MouseButton::Left), 1);
+    }
+
+    #[test]
+    fn cancelled_mouse_gesture_drops_its_press_edge() {
+        let mut input = Input::default();
+        input.inject_mouse_button(MouseButton::Left, true);
+        input.cancel_mouse_button(MouseButton::Left);
+        assert!(!input.mouse_button_down(MouseButton::Left));
+        assert!(!input.mouse_button_pressed(MouseButton::Left));
     }
 
     #[test]
@@ -372,6 +764,24 @@ mod tests {
 
         input.end_frame();
         assert_eq!(input.scroll(), Vec2::ZERO);
+    }
+
+    #[test]
+    fn cursor_moves_are_ignored_until_focus_is_restored() {
+        let mut input = Input::default();
+        input.on_window_event(&WindowEvent::Focused(false));
+        input.on_window_event(&WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(12.0, 24.0),
+        });
+        assert_eq!(input.cursor(), None);
+
+        input.on_window_event(&WindowEvent::Focused(true));
+        input.on_window_event(&WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(12.0, 24.0),
+        });
+        assert_eq!(input.cursor(), Some(Vec2::new(12.0, 24.0)));
     }
 
     #[test]
@@ -395,14 +805,21 @@ mod tests {
         assert!(!input.scroll_gesture_started());
         assert!(!input.scroll_gesture_ended());
 
+        input.inject_cursor(12.0, 24.0);
         input.inject_mouse_button(MouseButton::Left, true);
         input.on_window_event(&WindowEvent::Focused(false));
         assert!(!input.mouse_button_down(MouseButton::Left));
+        assert_eq!(input.cursor(), None);
         assert!(input.scroll_gesture_ended());
         assert!(input.interaction_cancelled());
 
         input.end_frame();
         assert!(!input.scroll_gesture_ended());
         assert!(!input.interaction_cancelled());
+
+        input.on_window_event(&WindowEvent::Focused(true));
+        assert!(input.interaction_restored());
+        input.end_frame();
+        assert!(!input.interaction_restored());
     }
 }

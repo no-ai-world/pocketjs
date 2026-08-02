@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   DEFAULT_VITA_PACKAGE_ASSETS,
   VITA_REQUIRED_SYSTEM_ASSETS,
@@ -22,7 +23,7 @@ import { vitaTitleId } from "../../framework/src/manifest/vita-package.ts";
 import { encodePNG } from "../png.ts";
 import { encodeThresholdInput, GOLDEN_SPECS } from "../golden-specs.ts";
 
-const ROOT = new URL("../..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const OUT = `${ROOT}dist/e2e-vita3k`;
 const VITAFS = `${OUT}/vitafs`;
 const CONFIG = `${OUT}/config/config.yml`;

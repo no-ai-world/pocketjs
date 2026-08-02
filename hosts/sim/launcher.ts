@@ -19,11 +19,12 @@
 // produce byte-identical framebuffers and switch logs.
 
 import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { BTN, PSM } from "../../contracts/spec/spec.ts";
 import { bootWorld, fnv1a, type SimWorld } from "./sim.ts";
 import { SHOT_W, SHOT_H, downscaleShot } from "./shot.ts";
 
-const ROOT = new URL("../..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const REGISTRY_JSON = ROOT + "dist/launcher-registry.json";
 
 export interface LauncherApp {

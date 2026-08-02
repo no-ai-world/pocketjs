@@ -703,6 +703,87 @@ pub fn hit_test(tree: &Tree, styles: &StyleTable, screen: (f32, f32), x: f32, y:
     hit
 }
 
+/// Resolve the 2D world transform for a live node.
+fn node_world_affine(tree: &Tree, styles: &StyleTable, id: i32) -> Option<Affine> {
+    // Build the live root-to-node path once for all coordinate conversions.
+    let mut path: Vec<u32> = Vec::new();
+    let mut cur = id;
+    let mut reached_root = false;
+    while cur != 0 {
+        let (gen, slot) = crate::tree::split_id(cur);
+        let node = tree.slots.get(slot as usize)?;
+        if !node.alive || node.generation != gen {
+            return None;
+        }
+        path.push(slot);
+        if cur == spec::ROOT_ID {
+            reached_root = true;
+            break;
+        }
+        cur = node.parent;
+    }
+    if !reached_root {
+        return None;
+    }
+    path.reverse();
+    let mut world = Affine::IDENTITY;
+    for slot in path {
+        let node = &tree.slots[slot as usize];
+        let r = style::resolve(node, styles, true);
+        if r.display == spec::Display::None as u8 || r.perspective > 0.0 {
+            return None;
+        }
+        world = world.then(&local_affine(&node.layout, &r));
+    }
+    Some(world)
+}
+
+/// Screen point → local point relative to node `id`'s border box.
+/// Composes the same per-node world affine as `hit_test` (2D only; perspective
+/// subtrees are not point-resolvable per node). Returns None when `id` is
+/// stale/detached, `display:none`, or the transform is non-invertible.
+pub fn node_local_point(
+    tree: &Tree,
+    styles: &StyleTable,
+    _screen: (f32, f32),
+    id: i32,
+    px: f32,
+    py: f32,
+) -> Option<(f32, f32)> {
+    if !px.is_finite() || !py.is_finite() {
+        return None;
+    }
+    let world = node_world_affine(tree, styles, id)?;
+    local_point(&world, px, py)
+}
+
+/// Map a node-local rectangle into a screen-space axis-aligned rectangle.
+pub fn node_screen_rect(
+    tree: &Tree,
+    styles: &StyleTable,
+    id: i32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    if ![x, y, w, h].iter().all(|value| value.is_finite()) || w < 0.0 || h < 0.0 {
+        return None;
+    }
+    let world = node_world_affine(tree, styles, id)?;
+    let corners = [
+        world.apply(x, y),
+        world.apply(x + w, y),
+        world.apply(x, y + h),
+        world.apply(x + w, y + h),
+    ];
+    let min_x = corners.iter().map(|point| point.0).fold(f32::INFINITY, f32::min);
+    let min_y = corners.iter().map(|point| point.1).fold(f32::INFINITY, f32::min);
+    let max_x = corners.iter().map(|point| point.0).fold(f32::NEG_INFINITY, f32::max);
+    let max_y = corners.iter().map(|point| point.1).fold(f32::NEG_INFINITY, f32::max);
+    Some((min_x, min_y, max_x - min_x, max_y - min_y))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn hit_walk(
     tree: &Tree,

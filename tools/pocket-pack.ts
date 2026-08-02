@@ -18,6 +18,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { POCKET_TARGETS } from "../contracts/spec/platforms.ts";
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
 import { canonicalJson } from "../framework/src/manifest/plan.ts";
@@ -33,7 +34,7 @@ import {
   type PocketPackageVariant,
 } from "../contracts/spec/pocket-package.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 function usage(message?: string): never {
   if (message) console.error(`pocket-pack: ${message}`);

@@ -15,10 +15,11 @@
 // runtimes from ever sharing globals.
 
 import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createWasmUi } from "../hosts/web/wasm-ops.js";
 import { BTN, SCREEN_H, SCREEN_W } from "../spec/spec.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SITE = ROOT + "site/";
 const SIM_DIR = SITE + ".cache/demo-wall/sim/";
 const BUILD_DIST = SITE + ".cache/demo-wall/sim-build/";

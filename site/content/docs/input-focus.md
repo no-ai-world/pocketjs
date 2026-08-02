@@ -67,6 +67,23 @@ contacts rather than prescribing tap, drag, or pinch semantics, so reusable
 gesture recognizers remain ordinary deterministic application code. Put
 `input.touch` in `enhances` when the same app must still build for PSP.
 
+## Native pointer
+
+Desktop targets that provide `input.pointer` expose one absolute mouse/trackpad
+position separately from touch contacts:
+
+```ts
+import { pointerPosition } from "@pocketjs/framework/input";
+
+onFrame(() => {
+  const point = pointerPosition(); // null while outside the window
+});
+```
+
+The framework maps that position to hover focus and uses `BTN.CIRCLE` for the
+press/drag/release edge. The desktop pointer is never inserted into
+`touches()`, whose entries retain touch-down/release semantics.
+
 ## Virtual cursor
 
 Targets that provide `input.cursor` can replace the d-pad focus walk with a

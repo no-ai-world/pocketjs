@@ -10,6 +10,7 @@
 import { $ } from "bun";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 interface Spec {
   app: string;
@@ -95,7 +96,7 @@ const SPECS: Spec[] = [
   },
 ];
 
-const pspUiDir = new URL("..", import.meta.url).pathname;
+const pspUiDir = fileURLToPath(new URL("..", import.meta.url));
 const argv = Bun.argv.slice(2);
 let samples = 5;
 let apps = ["stats"];

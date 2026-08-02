@@ -22,6 +22,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { BTN, IMG_FLAG_LINEAR } from "../contracts/spec/spec.ts";
 import {
   launcherGeneratedSources,
@@ -39,7 +40,7 @@ import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.t
 import { bootLauncherWorld, type LauncherWorld } from "../hosts/sim/launcher.ts";
 import { bootWorld, treeHasText } from "../hosts/sim/sim.ts";
 
-const repository = new URL("..", import.meta.url).pathname;
+const repository = fileURLToPath(new URL("..", import.meta.url));
 
 const settle = async (w: LauncherWorld, frames: number) => {
   for (let i = 0; i < frames; i++) await w.step(0);
@@ -100,14 +101,14 @@ describe("launcher registry admission", () => {
     );
     const generated = launcherGeneratedSources(displayRegistry);
     expect(
-      await Bun.file(
+      (await Bun.file(
         new URL("../apps/launcher/registry.generated.ts", import.meta.url),
-      ).text(),
+      ).text()).replaceAll("\r\n", "\n"),
     ).toBe(generated.registryTs);
     expect(
-      await Bun.file(
+      (await Bun.file(
         new URL("../apps/launcher/images.json", import.meta.url),
-      ).text(),
+      ).text()).replaceAll("\r\n", "\n"),
     ).toBe(generated.imagesJson);
   });
 

@@ -21,6 +21,7 @@ members = [
     "pocket3d/crates/pocket3d-cook",
     "pocket3d/examples/handheld",
     "pocket3d/examples/note-widget",
+    "pocket3d/examples/app-widget",
     "pocket3d/examples/uihost",
 ]
 exclude = [
@@ -67,6 +68,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 env_logger = "0.11"
 font8x8 = "0.3"
+arboard = "3"
 
 [profile.dev]
 opt-level = 1

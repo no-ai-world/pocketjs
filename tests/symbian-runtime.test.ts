@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { POCKET_TARGETS } from "../contracts/spec/platforms.ts";
 import {
   SYMBIAN_E7_DEV_CONTRACTS,
@@ -26,7 +27,7 @@ import {
 } from "../tools/launcher.ts";
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
 
-const repository = new URL("..", import.meta.url).pathname;
+const repository = fileURLToPath(new URL("..", import.meta.url));
 
 describe("experimental Nokia E7 runtime profile", () => {
   test("maps the E7 scan matrix without changing unrelated keys", () => {
@@ -178,7 +179,14 @@ describe("experimental Nokia E7 runtime profile", () => {
   });
 
   test("does not register an unproven production target", () => {
-    expect(Object.keys(POCKET_TARGETS)).toEqual(["psp", "vita", "pocketbook", "macos-widget"]);
+    expect(Object.keys(POCKET_TARGETS)).toEqual([
+      "psp",
+      "vita",
+      "pocketbook",
+      "macos-widget",
+      "windows-app",
+      "windows-widget",
+    ]);
     expect(POCKET_TARGETS).not.toHaveProperty(SYMBIAN_E7_DEV_TARGET_ID);
     expect(SYMBIAN_E7_DEV_HOST_ABI).toBe(4);
   });

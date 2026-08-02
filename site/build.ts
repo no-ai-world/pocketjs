@@ -16,6 +16,7 @@
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, cpSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { marked } from "marked";
 import { createHighlighter } from "shiki";
 import {
@@ -32,7 +33,7 @@ import { OG_IMAGE_URL, SITE_DESC, SITE_TITLE, SITE_URL, renderPage } from "./tem
 import { BLOG_POSTS, DOC_NAV, type DocSection } from "./nav.ts";
 import { emitSingleLodStagePackage } from "./stage-package.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname; // repo root
+const ROOT = fileURLToPath(new URL("..", import.meta.url)); // repo root
 const SITE = ROOT + "site/";
 const OUT = SITE + "dist/";
 const SHIMS = SITE + "playground/babel-shims/";

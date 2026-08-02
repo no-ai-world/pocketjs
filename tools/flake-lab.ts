@@ -24,11 +24,12 @@
 // Same code. The only difference is what "time" means.
 
 import { writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { bootWorld, runScenario } from "../hosts/sim/sim.ts";
 import { BTN } from "../contracts/spec/spec.ts";
 
 const RUNS = Number(argValue("--runs") ?? 60);
-const OUT = argValue("--out") ?? new URL("../dist/flake-lab.json", import.meta.url).pathname;
+const OUT = argValue("--out") ?? fileURLToPath(new URL("../dist/flake-lab.json", import.meta.url));
 
 function argValue(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);

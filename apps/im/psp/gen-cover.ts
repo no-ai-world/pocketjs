@@ -9,11 +9,12 @@
 //   bun apps/im/psp/gen-cover.ts     (rewrites icon0.png + pic1.png here)
 
 import { createCanvas, GlobalFonts, type SKRSContext2D } from "@napi-rs/canvas";
+import { fileURLToPath } from "node:url";
 import { runScenario } from "../../../hosts/sim/sim.ts";
 import { BTN } from "../../../contracts/spec/spec.ts";
 
-const ROOT = new URL("../../../", import.meta.url).pathname;
-const OUT = new URL("./", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+const OUT = fileURLToPath(new URL("./", import.meta.url));
 
 GlobalFonts.registerFromPath(ROOT + "assets/fonts/Inter-Bold.ttf", "Inter");
 

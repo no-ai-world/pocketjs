@@ -1,8 +1,9 @@
 // Reproducible pocketjs.dev build from a fresh checkout. Keep local preview,
 // main deploys, and tag releases on the same prerequisite chain.
 import { existsSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const generatedStyles = ROOT + "framework/src/styles.generated.ts";
 
 // tools/build.ts imports this gitignored module during its first pass. Seed a

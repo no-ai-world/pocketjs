@@ -1,7 +1,7 @@
 import { $ } from "bun";
 import { cpSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   FRAMEWORKS,
   parseFramework,
@@ -22,7 +22,7 @@ import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.t
 import { demoIdentity, demoManifestFor } from "./demo-identity.ts";
 import { packageVitaVpk } from "./vita-package.ts";
 
-const pspUiDir = new URL("..", import.meta.url).pathname; // PocketJS/
+const pspUiDir = fileURLToPath(new URL("..", import.meta.url)); // PocketJS/
 const nativeDir = pspUiDir + "hosts/vita/";
 const home = process.env.HOME ?? "";
 

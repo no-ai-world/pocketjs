@@ -24,8 +24,13 @@
 //   {t:"mouse", x, y, d, sh}   pointer moved / pressed / released — d is
 //                              the primary-button state (a line is sent on
 //                              every press/release even without movement),
+//                              outside marks a stale release after leave;
 //                              sh the shift modifier (extends selections)
+//   {t:"mouse_leave"}         cursor left the window; active drag capture
+//                              remains until mouse release or blur
 //   {t:"scroll", dy}           wheel delta in logical px
+//   {t:"blur"}                  cancel pointer/editing capture on focus loss
+//   {t:"focus"}                 restore host caret reporting after focus gain
 //
 // guest → host lines:
 //   {t:"save", text}           persist the document (debounced by the app)
@@ -35,11 +40,12 @@
 //   {t:"copy", text}           put text on the system clipboard (⌘C)
 //   {t:"caret", x, y, h}       caret rect (logical px) — the host docks the
 //                              IME candidate window next to it
+//   {t:"caret_clear"}          clear the native IME anchor
 
-import { getOps } from "@pocketjs/framework";
+import { connectNoteHost } from "@pocketjs/framework/input";
 
 export interface HostEvent {
-  t: "hello" | "resize" | "load" | "ch" | "key" | "mouse" | "scroll" | "paste" | "ime";
+  t: "hello" | "resize" | "load" | "ch" | "key" | "mouse" | "mouse_leave" | "scroll" | "paste" | "ime" | "blur" | "focus";
   w?: number;
   h?: number;
   text?: string;
@@ -47,10 +53,12 @@ export interface HostEvent {
   k?: string;
   x?: number;
   y?: number;
-  /** Primary mouse button held ("mouse" events). */
+  /** Primary mouse button held; omitted on movement means keep the prior state. */
   d?: boolean;
   /** Shift held (mouse presses and named keys) — extends selections. */
   sh?: boolean;
+  /** Release happened after the cursor left the native window. */
+  outside?: boolean;
   dy?: number;
   /** IME preedit caret (char index into s), null when composition ends. */
   c?: number | null;
@@ -65,33 +73,21 @@ export interface Svc {
       | { t: "quit" }
       | { t: "menu"; open: boolean }
       | { t: "copy"; text: string }
-      | { t: "caret"; x: number; y: number; h: number },
+      | { t: "caret"; x: number; y: number; h: number }
+      | { t: "caret_clear" },
   ): void;
 }
 
 /** Probe the channel; null = standalone (no widget host on the other end). */
 export function connectSvc(): Svc | null {
-  const ops = getOps();
-  if (!ops.svcOpen || !ops.svcPoll || !ops.svcSend || !ops.svcOpen("note")) return null;
-  const poll = ops.svcPoll.bind(ops);
-  const send = ops.svcSend.bind(ops);
+  const channel = connectNoteHost();
+  if (!channel) return null;
   return {
     poll() {
-      const batch = poll();
-      if (!batch) return [];
-      const events: HostEvent[] = [];
-      for (const line of batch.split("\n")) {
-        if (line === "") continue;
-        try {
-          events.push(JSON.parse(line) as HostEvent);
-        } catch {
-          // A malformed line is a host bug; skip it rather than wedge.
-        }
-      }
-      return events;
+      return channel.poll() as HostEvent[];
     },
     send(line) {
-      send(JSON.stringify(line));
+      channel.send(line);
     },
   };
 }

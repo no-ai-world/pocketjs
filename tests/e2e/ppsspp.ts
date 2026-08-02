@@ -24,8 +24,9 @@
 import { $ } from "bun";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 
-const pspUiDir = new URL("../..", import.meta.url).pathname; // PocketJS/
+const pspUiDir = fileURLToPath(new URL("../..", import.meta.url)); // PocketJS/
 const goldensDir = `${pspUiDir}tests/goldens/psp`;
 const outDir = `${pspUiDir}dist/e2e-ppsspp`;
 const headless = process.env.PPSSPP_HEADLESS || `${homedir()}/ppsspp-src/build/PPSSPPHeadless`;

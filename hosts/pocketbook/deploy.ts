@@ -19,8 +19,9 @@
 import { chmodSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { copyFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = resolve(dirname(new URL(import.meta.url).pathname), "../..");
+const ROOT = resolve(dirname(fileURLToPath(new URL(import.meta.url))), "../..");
 const HOST_BIN = join(
   ROOT,
   "hosts/pocketbook/target/armv7-unknown-linux-gnueabi/release/pocketbook-host",

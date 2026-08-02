@@ -20,9 +20,10 @@
 
 import { $ } from "bun";
 import { existsSync, mkdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { ensureSimClip } from "./record-sim-clips.ts";
 
-const SITE = new URL(".", import.meta.url).pathname;
+const SITE = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = SITE + "../";
 const CACHE = SITE + ".cache/demo-wall/";
 const BLOG = SITE + "assets/blog/";

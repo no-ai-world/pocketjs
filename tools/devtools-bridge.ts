@@ -20,6 +20,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { bundleHash, launcherBundleHash } from "./bundle-hash.ts";
 import { encodePNG } from "../tests/png.ts";
 
@@ -114,7 +115,7 @@ export function startBridge(opts: BridgeOptions): Bridge {
     return "data:image/png;base64," + encodePNG(rgba, w, h).toString("base64");
   }
 
-  const distDir = opts.dist ?? new URL("../dist", import.meta.url).pathname;
+  const distDir = opts.dist ?? fileURLToPath(new URL("../dist", import.meta.url));
 
   /** Stale-embed tripwire: the device's stats reply carries the FNV-1a64 of
    *  the js+pak baked into the PRX (hosts/psp/build.rs); compare it with the

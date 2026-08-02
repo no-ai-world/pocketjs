@@ -12,10 +12,12 @@ export { __setAnalog, analogRaw, analogX, analogY } from "./analog.ts";
 type FrameCallback = (buttons: number) => void;
 
 const callbacks = new Set<FrameCallback>();
+const persistentCallbacks = new Set<FrameCallback>();
 let buttonHandlerBlockDepth = 0;
 
 export function resetFrameHooks(): void {
   callbacks.clear();
+  for (const callback of persistentCallbacks) callbacks.add(callback);
   buttonHandlerBlockDepth = 0;
   __resetAnalog();
 }
@@ -24,9 +26,30 @@ export function runFrameHooks(buttons: number): void {
   for (const cb of [...callbacks]) cb(buttons);
 }
 
-export function onFrame(callback: FrameCallback): void {
+function addFrameCallback(callback: FrameCallback, persistent = false): () => void {
+  // Register one callback and return its idempotent disposer.
   callbacks.add(callback);
-  onCleanup(() => callbacks.delete(callback));
+  if (persistent) persistentCallbacks.add(callback);
+  let disposed = false;
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    callbacks.delete(callback);
+    persistentCallbacks.delete(callback);
+  };
+}
+
+export function onFrame(callback: FrameCallback): () => void {
+  // Register one component-scoped lifecycle callback.
+  const dispose = addFrameCallback(callback);
+  onCleanup(dispose);
+  return dispose;
+}
+
+/** Register a frame callback whose owner is managed by the caller. */
+export function onFramePersistent(callback: FrameCallback): () => void {
+  // Register a callback without binding it to the current reactive owner.
+  return addFrameCallback(callback, true);
 }
 
 export interface ButtonPressOptions {

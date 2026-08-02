@@ -6,6 +6,7 @@
 import { $ } from "bun";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
 
 type Demo = {
@@ -25,7 +26,7 @@ type Options = {
   basePort?: number;
 };
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DEMOS_DIR = join(ROOT, "apps");
 const OUT_ROOT = join(ROOT, "dist/psplink");
 const MAIN_SUFFIX = "-main.tsx";

@@ -15,7 +15,7 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
 import { Focusable, Image, Portal, Text, View } from "@pocketjs/framework/components";
 import { onButtonPress, onFrame } from "@pocketjs/framework/lifecycle";
-import { BTN, focusNode, hitFocusable } from "@pocketjs/framework/input";
+import { BTN, blurFocus, focusNode, hitFocusable, restoreFocus } from "@pocketjs/framework/input";
 import { resizeViewport, type NodeMirror } from "@pocketjs/framework";
 import { hasFeature } from "@pocketjs/framework/platform";
 import { parseMarkdown } from "./markdown.ts";
@@ -158,6 +158,13 @@ export default function Note(): ReturnType<typeof View> {
   const [scrollV, setScrollV] = createSignal(0);
   const [scrollE, setScrollE] = createSignal(0);
   const [mouse, setMouse] = createSignal({ x: -1, y: -1 });
+  let hostFocused = true;
+  let lastCaretRect = { x: -1, y: -1, h: -1 };
+  const resetCaretReport = (sendClear: boolean) => {
+    // Reset the native caret-report cache.
+    lastCaretRect = { x: -1, y: -1, h: -1 };
+    if (sendClear) svc?.send({ t: "caret_clear" });
+  };
 
   const ink = () => (dark() ? INK.dark : INK.light);
   const contentW = () => Math.min(vp().w - PAD_X * 2, MAX_CONTENT_W);
@@ -301,15 +308,17 @@ export default function Note(): ReturnType<typeof View> {
     const y = EDGE_PAD + caretLine(dlines(), pos) * BODY_LINE_H;
     setScrollE(Math.max(0, Math.min(maxScrollE(), y - viewH() / 3)));
     setEditing(true);
+    resetCaretReport(false);
     goalSticky = false;
-    rehover = true;
+    rehover = hostFocused;
   };
   const leaveEdit = () => {
     setPreedit(null);
+    resetCaretReport(true);
     setEditing(false);
     if (saveIn > 0) save();
     setScrollV(Math.max(0, Math.min(maxScrollV(), scrollV())));
-    rehover = true;
+    rehover = hostFocused;
   };
 
   const handleKey = (k: string, shift = false) => {
@@ -351,6 +360,15 @@ export default function Note(): ReturnType<typeof View> {
       else if (!editing() && vsel()) setVsel(null);
       else if (editing() && editSel()) collapseOr("hi", (s) => s.caret);
       else if (editing()) leaveEdit();
+      return;
+    }
+    if (k === "SelectAll") {
+      if (editing() && !preedit()) {
+        setAnchor(0);
+        setCaret(doc().length);
+        breakRun(history);
+        revealCaret();
+      }
       return;
     }
     if (k === "Copy") {
@@ -499,6 +517,11 @@ export default function Note(): ReturnType<typeof View> {
   };
 
   const handleEvent = (ev: HostEvent) => {
+    // Ignore queued interactive input until the shell explicitly restores focus.
+    if (!hostFocused && (
+      ev.t === "ch" || ev.t === "paste" || ev.t === "ime" || ev.t === "key" ||
+      ev.t === "mouse" || ev.t === "mouse_leave" || ev.t === "scroll"
+    )) return;
     switch (ev.t) {
       case "hello":
       case "resize":
@@ -545,17 +568,57 @@ export default function Note(): ReturnType<typeof View> {
       case "key":
         if (ev.k) handleKey(ev.k, ev.sh ?? false);
         break;
+      case "blur":
+        hostFocused = false;
+        press = null;
+        prevDown = false;
+        resetCaretReport(true);
+        setPreedit(null);
+        blurFocus();
+        lastHover = null;
+        rehover = false;
+        setMouse({ x: -1, y: -1 });
+        break;
+      case "focus":
+        hostFocused = true;
+        restoreFocus();
+        resetCaretReport(false);
+        break;
+      case "mouse_leave":
+        if (press === null) {
+          focusNode(null);
+          lastHover = null;
+          setMouse({ x: -1, y: -1 });
+        }
+        break;
       case "mouse": {
         const p = { x: ev.x ?? -1, y: ev.y ?? -1 };
-        const down = ev.d ?? false;
+        // Legacy hosts may omit d on movement; omission preserves the held state.
+        const down = ev.d ?? prevDown;
+        const hadCapture = press !== null;
         setMouse(p);
         if (down && !prevDown) pointerDown(p.x, p.y, ev.sh ?? false);
         else if (down) pointerMove(p.x, p.y, true);
         if (!down && prevDown) pointerUp(p.x, p.y);
         prevDown = down;
+        if (ev.outside === true && !down) {
+          // The release ended outside; stale coordinates cannot re-enter hover.
+          press = null;
+          lastHover = null;
+          rehover = false;
+          setMouse({ x: -1, y: -1 });
+          focusNode(null);
+          break;
+        }
         const n = hitFocusable(p.x, p.y);
-        if (n && n !== lastHover) focusNode(n);
-        lastHover = n;
+        // A captured press owns focus through release; stale release coordinates
+        // must not retarget hover after the pointer has left the window.
+        const capturedInteraction = hadCapture && down;
+        if (!capturedInteraction) {
+          if (n && n !== lastHover) focusNode(n);
+          else if (!n) focusNode(null);
+          lastHover = n;
+        }
         break;
       }
       case "scroll": {
@@ -567,12 +630,11 @@ export default function Note(): ReturnType<typeof View> {
     }
   };
 
-  let lastCaretRect = { x: -1, y: -1, h: -1 };
   onFrame(() => {
     if (saveIn > 0 && --saveIn === 0) save();
     if (!svc) return;
     for (const ev of svc.poll()) handleEvent(ev);
-    if (editing()) {
+    if (editing() && hostFocused) {
       const rect = {
         x: Math.round(marginX() + caretPx()),
         y: Math.round(HEADER_H + EDGE_PAD + caretRow() * BODY_LINE_H - scrollE()),
@@ -588,11 +650,10 @@ export default function Note(): ReturnType<typeof View> {
       // remounted, so hover-focus it again without waiting for a move.
       rehover = false;
       const m = mouse();
-      if (m.x >= 0) {
-        const n = hitFocusable(m.x, m.y);
-        if (n) focusNode(n);
-        lastHover = n;
-      }
+      const n = hostFocused && m.x >= 0 ? hitFocusable(m.x, m.y) : null;
+      if (n) focusNode(n);
+      else focusNode(null);
+      lastHover = n;
     }
   });
 

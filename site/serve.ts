@@ -1,8 +1,9 @@
 // site/serve.ts — static preview server for site/dist (local verification only).
 //   bun site/serve.ts            # http://127.0.0.1:8140
 import { existsSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
-const DIST = new URL("./dist/", import.meta.url).pathname;
+const DIST = fileURLToPath(new URL("./dist/", import.meta.url));
 const PORT = Number(process.env.PORT ?? 8140);
 const MIME: Record<string, string> = {
   html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8",

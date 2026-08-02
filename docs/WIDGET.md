@@ -120,31 +120,69 @@ one `render_words_scaled` pass on dirty frames. It exercises everything the
   windows keep macOS edge-resize; the shell also tracks an explicit
   grip-corner drag (`resize_at`, `WidgetConfig::resizable`/`min_size`).
 - **The svc channel is the desktop companion contract.** The spec mailbox
-  (ops 30..32) needs no new ops for a host that lives in-process: real
-  keyboard/mouse/wheel/resize go to the guest as JSON lines
-  (`{t:"ch"|"key"|"mouse"|"scroll"|"resize"|"load"}`), save/quit intents
-  come back (`{t:"save"|"quit"}`). The app source retains a svc-less
-  read-only fallback, but the current Note manifest is dynamic-only; it must
-  add a fixed viewport variant before a PSP or embedded host can admit that
-  fallback. The §7 `widget` surface stays unbuilt.
+  (ops 30..32) needs no new ops for a host that lives in-process. Shell
+  input (resize / scroll / pointer / text / key / ime / paste) is tagged
+  `src:"shell"` and consumed via `connectHostInput()` / `installHostInputPump()`;
+  companion business JSONL is tagged `src:"companion"` and consumed via
+  `connectCompanion()` — apps never hand-filter `isHostEvent`. Note still
+  accepts untagged historical lines. Guest intents (`save`/`quit`/`copy`/
+  `caret`/`ensure_text`) return on the same mailbox; unknown guest lines
+  forward to an optional external companion process. The §7 `widget`
+  surface stays unbuilt.
 - **The desktop surface is first-class in the platform contracts.** Six
   registered capability ids name it (`input.text`, `input.pointer`,
   `input.ime`, `host.clipboard`, `display.viewport.live`,
   `text.glyphs.runtime` — each a distinct observable guarantee; a real
-  pointer is NOT `input.cursor`), and a `macos-widget` target
-  profile (hostAbi 3, density 2, `dynamicViewport` range) provides them.
-  Target semantics live in queryable profile FIELDS (`platform`,
-  `form` — takeover/window/widget/kiosk/embedded); ids are labels
-  (convention `<platform>-<form>`, future: `macos-app`, `linux-kiosk`),
-  and apps declare viewport intent per policy (`fixed`/`dynamic`
-  variants), not per target. Pocket Note currently declares only a dynamic
-  variant and is therefore intentionally admitted by `macos-widget`, not by
-  PSP/Vita or an embedded Stage screen. Its desktop-only APIs sit in
-  `enhances`; if the app later adds a fixed variant, the same source can
-  degrade to a read-only note on hosts without those features. Native hosts
-  assert identity (`__host`/`__hostAbi` vs the plan's target), and
-  `bun run note` builds through the manifest — density and features come from
-  the profile, not flags.
+  pointer is NOT `input.cursor`), and desktop target profiles provide them:
+  `macos-widget` / `windows-widget` are ambient notes, while `windows-app`
+  is the ordinary Windows window form (all desktop hosts use hostAbi 4, density 2, dynamic viewport;
+  fixed apps are admitted size-locked). Target semantics live in queryable
+  profile FIELDS
+  (`platform`, `form` — takeover/window/widget/kiosk/embedded); ids are
+  labels (convention `<platform>-<form>`, future: `macos-app`,
+  `linux-kiosk`), and apps declare viewport intent per policy
+  (`fixed`/`dynamic` variants), not per target. Pocket Note currently
+  declares only a dynamic variant and is therefore intentionally admitted
+  by either desktop-widget stock host, not by PSP/Vita or an embedded Stage
+  screen. Its desktop-only APIs sit in `enhances`; if the app later adds a
+  fixed variant, the same source can degrade to a read-only note on hosts
+  without those features. Native hosts assert identity (`__host`/`__hostAbi`
+  vs the plan's target), and `bun run note` builds through the manifest
+  against the host OS's stock target (`macos-widget` on macOS,
+  `windows-widget` on Windows) — density and features come from the profile,
+  not flags.
+- **Stock `app-widget` is the generic desktop App Shell.** It always uses
+  `--chrome app` and opens an ordinary OS window (title bar + edges) for any
+  `*-main` bundle: `bun run app-widget form` (the launcher writes and passes
+  the resolved plan). It does not
+  expose Pocket Note document/save/menu semantics. Pocket Note uses the
+  separate `note-widget` binary with `--chrome note` (as `bun run note` does).
+  Launchers intersect dynamic manifest `min`/`max` bounds with the selected
+  target range and pass them to the native window; manifests containing both
+  `fixed` and `dynamic` variants follow the target's resolved variant.
+- **Pointer paths split by chrome.** Note chrome keeps the historical svc
+  `{t:"mouse"}` bridge for the markdown editor. A cursor leaving the native
+  window emits shell `{t:"mouse_leave"}`; it clears hover focus but preserves
+  an active drag until release or blur; an outside release is marked on the
+  shell mouse record so it cannot retarget focus. `windows-app` uses the
+  desktop pointer wire form + CIRCLE for `onPress`, and also emits shell `{t:"mouse"}` so
+  framework `TextInput` can place carets/selections.
+- **Framework TextInput.** `@pocketjs/framework/components` exports a
+  controlled single/multi-line `TextInput` (value / placeholder / disabled,
+  onChange / onSubmit / onBlur) backed by `@pocketjs/framework/text-edit`
+  math and the host-input pump. Focus kinds split `action` (buttons) from
+  `editable` (fields): text keys only reach the focused editable; Tab moves
+  focus. Clipboard copy/cut/paste and IME preedit/commit are framework-level
+  on any app that declares `input.text` / `host.clipboard` / `input.ime`.
+- **Companion lifecycle.** `--companion <program> [--companion-arg …]
+  [--companion-cwd <dir>]` spawns a stdio JSONL child (stderr inherited).
+  Crash → shell `{t:"companion_offline"}` to the guest; optional bounded
+  restart; process dies with the window.
+- **Transparent may degrade on Windows widgets.** DX12 swapchains often
+  advertise only Opaque. The shell still boots, logs
+  `pocket-widget: display_transparent=0|1`, and exposes
+  `pocket_widget::display_transparent()` for in-process readers instead of
+  pretending the surface stayed transparent.
 - **Clicks are CIRCLE.** The host synthesizes the spec press button while
   the mouse is down; the app resolves hover → focus (`hitFocusable` +
   `focusNode`) from svc mouse moves, and the framework's stock onPress
@@ -152,9 +190,9 @@ one `render_words_scaled` pass on dirty frames. It exercises everything the
   now spans the overlay layer, fixing menus for every cursor-mode app).
 - **Text editing without an OSK.** The `pocket3d` `Input` grew a per-frame
   edit-keystroke stream (chars with layout applied, named keys, repeats)
-  and a wheel accumulator; the guest's editor (measured soft wrap, caret
-  math, click-to-caret, drag selection, a coalescing undo/redo stack
-  driven by ⌘Z/⇧⌘Z) is pure JS over `measureText`, unit-tested in bun.
+  and a wheel accumulator. Edit math (wrap / caret / selection / undo) lives
+  in `@pocketjs/framework/text-edit`; Note re-exports it, and `TextInput`
+  is the reusable form control. Unit-tested in bun.
   Preview mode gets browser-style drag selection over the rendered rows
   (select.ts — (row, char) space, boundary rows clipped, code blocks
   atomic) and clicks are inert, exactly like a real markdown preview —
@@ -232,6 +270,9 @@ to implement:
 - The windowed shell explicitly requests wgpu's `LowPower` adapter. On Apple
   Silicon that remains Metal on the integrated Apple GPU; headless tooling and
   full-screen game hosts keep the existing `HighPerformance` default.
+- Optional measurement override: `POCKETJS_WIDGET_ADAPTER=auto|cpu|integrated|discrete`
+  (aliases: `warp`, `igpu`, `dgpu`). Only consulted on the LowPower widget path;
+  forced classes refuse silent fallback when no surface-capable match exists.
 - **Measured receipt (M3 Max, 10 s, release build).** The static settings app
   ran 601 guest ticks but presented only 2 GPU frames (0.3%); the hero app,
   whose spinner keeps changing, presented 224 (37.3%). Total process CPU time

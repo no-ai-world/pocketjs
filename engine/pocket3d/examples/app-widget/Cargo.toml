@@ -1,0 +1,11 @@
+[package]
+name = "app-widget"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The generic PocketJS desktop App Shell for arbitrary app bundles"
+
+[dependencies]
+anyhow = { workspace = true }
+note-widget = { path = "../note-widget" }

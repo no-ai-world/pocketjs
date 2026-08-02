@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   PSP_TOOLCHAIN,
   cachedCargoPspBin,
@@ -30,7 +31,7 @@ import {
   writePinnedCargoPspReceipt,
 } from "./psp-toolchain.ts";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fileURLToPath(new URL("..", import.meta.url));
 const home = process.env.HOME ?? "";
 const cacheRoot = pocketStackCacheRoot();
 const cachedSdk = cachedPspSdk();

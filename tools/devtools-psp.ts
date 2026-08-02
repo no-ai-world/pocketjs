@@ -10,9 +10,10 @@
 
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { startBridge } from "./devtools-bridge.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 function argValue(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);

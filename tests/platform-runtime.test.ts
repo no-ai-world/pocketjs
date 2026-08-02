@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   jsxPlugin,
   packagePath,
@@ -13,7 +14,7 @@ import type { HostOps } from "../framework/src/host.ts";
 
 async function bundlePlatform(defines: Record<string, string> = {}) {
   const result = await Bun.build({
-    entrypoints: [new URL("../framework/src/platform.ts", import.meta.url).pathname],
+    entrypoints: [fileURLToPath(new URL("../framework/src/platform.ts", import.meta.url))],
     format: "esm",
     target: "bun",
     define: defines,

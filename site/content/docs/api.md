@@ -579,8 +579,21 @@ function touches(): readonly TouchContact[]
 Returns an immutable snapshot of the current front-panel contacts. Coordinates
 are always logical PocketJS pixels, independent of the target raster density;
 at most eight contacts are delivered. No active touch is an empty snapshot,
-not an unavailable API. Declare `input.touch` in `pocket.json` and guard an
-optional enhancement with `hasFeature("input.touch")`.
+not an unavailable API. A desktop mouse/trackpad is not a touch contact; use
+`pointerPosition()` for the native desktop pointer. Declare `input.touch` in
+`pocket.json` and guard an optional enhancement with `hasFeature("input.touch")`.
+
+### `pointerPosition`
+
+```ts
+interface PointerPosition { readonly x: number; readonly y: number }
+function pointerPosition(): PointerPosition | null
+```
+
+Returns the current native desktop pointer in logical viewport coordinates, or
+`null` while the pointer is outside the window. Declare `input.pointer` before
+using this API; hover focus and press/release dispatch are handled by the
+framework automatically.
 
 ### `focusNode`
 

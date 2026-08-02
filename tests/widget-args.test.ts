@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { sep } from "node:path";
 import {
   STAGE_HOST_ABI,
   STAGE_TARGET_ID,
+  assertWidgetStagePlatform,
   parseWidgetArgs,
   resolveStageBuildPlan,
   stageDisplayFacts,
@@ -10,7 +12,14 @@ import {
   widgetStageConfig,
 } from "../tools/widget.ts";
 
+const portablePath = (value: string): string => value.replaceAll(sep, "/");
+
 describe("widget wrapper arguments", () => {
+  test("rejects the macOS-only stage on Windows", () => {
+    expect(() => assertWidgetStagePlatform("win32")).toThrow("requires darwin");
+    expect(() => assertWidgetStagePlatform("darwin")).not.toThrow();
+  });
+
   test("defaults to the hero app", () => {
     expect(parseWidgetArgs([])).toEqual({
       stage: "psp",
@@ -124,10 +133,13 @@ describe("widget wrapper arguments", () => {
     const psp = stagePlanPath("psp", "hero-main");
     const ipod = stagePlanPath("ipod", "ipod-nano-main");
     expect(psp).not.toBe(ipod);
-    expect(psp.endsWith("/psp-hero-main.plan.json")).toBe(true);
-    expect(ipod.endsWith("/ipod-ipod-nano-main.plan.json")).toBe(true);
-    expect(stagePlanPath("ipod", "nested/demo-main").endsWith("/ipod-nested_demo-main.plan.json"))
-      .toBe(true);
+    expect(portablePath(psp).endsWith("/psp-hero-main.plan.json")).toBe(true);
+    expect(portablePath(ipod).endsWith("/ipod-ipod-nano-main.plan.json")).toBe(true);
+    expect(
+      portablePath(stagePlanPath("ipod", "nested/demo-main")).endsWith(
+        "/ipod-nested_demo-main.plan.json",
+      ),
+    ).toBe(true);
   });
 
   test("rejects unsupported or repeated stage selectors", () => {
@@ -167,7 +179,7 @@ describe("Pocket Stage manifest admission", () => {
   test("reads the iPod profile display and admits its 176x132 app", async () => {
     const stage = widgetStageConfig("ipod");
     expect(stage.defaultApp).toBe("ipod-nano-main");
-    expect(stage.profile?.endsWith("/assets/ipod-nano-2/profile.json")).toBe(true);
+    expect(portablePath(stage.profile).endsWith("/assets/ipod-nano-2/profile.json")).toBe(true);
     expect(stage.display).toEqual({ logicalSize: [176, 132], rasterDensity: 1 });
 
     const manifest = await Bun.file(

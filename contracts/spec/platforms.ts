@@ -68,11 +68,12 @@ export interface DisplayProfile {
   /**
    * Present exactly when the target's form is dynamic (window/widget): any
    * logical size within [min, max] is admissible, and the host resizes the
-   * core live (`display.viewport.live`). `logicalViewports` then lists the
-   * DEFAULT size a plan bakes assets for. `acceptsFixed` opts the target
-   * into hosting fixed-viewport apps in a size-locked window (an app-form
-   * host would set it; a widget shell is not a general app frame and
-   * leaves it off).
+   * core live (`display.viewport.live`). For dynamic targets,
+   * `physicalViewport`/`logicalViewports` are the target's nominal baseline;
+   * an app's dynamic manifest supplies the actual plan default within the
+   * declared range. `acceptsFixed` opts the target into hosting fixed-viewport
+   * apps in a size-locked window (an app-form host would set it; a widget shell
+   * is not a general app frame and leaves it off).
    */
   readonly dynamicViewport?: {
     readonly min: Viewport;
@@ -164,6 +165,8 @@ export const POCKET_TARGETS = defineTargetRegistry<PocketCapabilityId, {
   readonly vita: TargetProfile<PocketCapabilityId>;
   readonly pocketbook: TargetProfile<PocketCapabilityId>;
   readonly "macos-widget": TargetProfile<PocketCapabilityId>;
+  readonly "windows-app": TargetProfile<PocketCapabilityId>;
+  readonly "windows-widget": TargetProfile<PocketCapabilityId>;
 }>({
   psp: {
     hostAbi: 1,
@@ -229,9 +232,22 @@ export const POCKET_TARGETS = defineTargetRegistry<PocketCapabilityId, {
   // pointer is real, text comes from the keyboard/IME, and unseen glyphs
   // bake at runtime. A widget shell is not a general app frame, so it does
   // not accept fixed-viewport apps (a future macos-app target would).
-  "macos-widget": {
-    hostAbi: 3,
-    platform: "macos",
+  // macos-widget and windows-widget are sibling ambient hosts. Windows
+  // ordinary apps use a separate window-form target so admission cannot
+  // accidentally give them widget semantics.
+  "macos-widget": desktopWidgetProfile("macos"),
+  "windows-app": desktopAppProfile(),
+  "windows-widget": desktopWidgetProfile("windows"),
+});
+
+/** Shared capability/display contract for ambient desktop widgets. */
+function desktopWidgetProfile(
+  platform: "macos" | "windows",
+): TargetProfile<PocketCapabilityId> {
+  return {
+    // Describe the shared desktop widget host contract.
+    hostAbi: 4,
+    platform,
     form: "widget",
     display: {
       physicalViewport: [840, 1120],
@@ -240,18 +256,44 @@ export const POCKET_TARGETS = defineTargetRegistry<PocketCapabilityId, {
       presentations: ["native"],
       rasterDensity: 2,
     },
-    capabilities: [
-      "input.buttons",
-      "input.ime",
-      "input.pointer",
-      "input.text",
-      "host.clipboard",
-      "display.viewport.live",
-      "text.glyphs.baked",
-      "text.glyphs.runtime",
-    ],
-  },
-});
+    capabilities: desktopCapabilities(),
+  };
+}
+
+/** Native Windows 10 ordinary-window contract; fixed apps are size-locked. */
+function desktopAppProfile(): TargetProfile<PocketCapabilityId> {
+  return {
+    // Describe the Windows ordinary-window host contract.
+    hostAbi: 4,
+    platform: "windows",
+    form: "window",
+    display: {
+      physicalViewport: [960, 640],
+      logicalViewports: [[480, 320]],
+      dynamicViewport: {
+        min: [240, 180],
+        max: [4096, 4096],
+        acceptsFixed: true,
+      },
+      presentations: ["native"],
+      rasterDensity: 2,
+    },
+    capabilities: desktopCapabilities(),
+  };
+}
+
+function desktopCapabilities(): readonly PocketCapabilityId[] {
+  return [
+    "input.buttons",
+    "input.ime",
+    "input.pointer",
+    "input.text",
+    "host.clipboard",
+    "display.viewport.live",
+    "text.glyphs.baked",
+    "text.glyphs.runtime",
+  ];
+}
 
 export type PocketTargetId = TargetId<typeof POCKET_TARGETS>;
 

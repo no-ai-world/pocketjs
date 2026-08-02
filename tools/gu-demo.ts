@@ -12,9 +12,10 @@
 
 import { $ } from "bun";
 import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { resolvePspBuildToolchain } from "./psp-toolchain.ts";
 
-const repo = new URL("..", import.meta.url).pathname;
+const repo = fileURLToPath(new URL("..", import.meta.url));
 const home = process.env.HOME ?? "";
 const pocket3d = `${repo}engine/pocket3d/`;
 const demoDir = `${pocket3d}crates/gu-demo/`;

@@ -9,13 +9,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { checkAppTypes } from "../framework/compiler/app-check.ts";
 
-const FIXTURES = new URL("fixtures/app-check/", import.meta.url).pathname;
-const ROOT_TSCONFIG = new URL("../tsconfig.json", import.meta.url).pathname;
-const JSX_DECLARATIONS = new URL("../framework/src/jsx.d.ts", import.meta.url).pathname;
-const VUE_SFC_DECLARATIONS = new URL("../framework/src/vue-sfc.d.ts", import.meta.url).pathname;
-const SOLID_CONTROL_FLOW_ENTRY = new URL("../apps/cards/main.tsx", import.meta.url).pathname;
+const FIXTURES = fileURLToPath(new URL("fixtures/app-check/", import.meta.url));
+const ROOT_TSCONFIG = fileURLToPath(new URL("../tsconfig.json", import.meta.url));
+const JSX_DECLARATIONS = fileURLToPath(new URL("../framework/src/jsx.d.ts", import.meta.url));
+const VUE_SFC_DECLARATIONS = fileURLToPath(new URL("../framework/src/vue-sfc.d.ts", import.meta.url));
+const SOLID_CONTROL_FLOW_ENTRY = fileURLToPath(new URL("../apps/cards/main.tsx", import.meta.url));
 
 function entry(fixture: string): string {
   const sourceDirectory = resolve(FIXTURES, fixture);
@@ -53,8 +54,10 @@ describe("per-app TypeScript checks", () => {
 
     expect(errors(result)).toBe("");
     expect(result.ok).toBe(true);
-    expect(result.checkedFiles.some((file) => file.endsWith("/main.ts"))).toBe(true);
-    expect(result.checkedFiles.some((file) => file.endsWith("/controls.ts"))).toBe(true);
+    expect(result.checkedFiles.some((file) => file.replaceAll("\\", "/").endsWith("/main.ts"))).toBe(true);
+    expect(
+      result.checkedFiles.some((file) => file.replaceAll("\\", "/").endsWith("/controls.ts")),
+    ).toBe(true);
     expect(result.checkedFiles.some((file) => file.endsWith("/unrelated-broken.ts"))).toBe(false);
   });
 

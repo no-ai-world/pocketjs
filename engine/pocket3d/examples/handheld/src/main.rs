@@ -920,8 +920,8 @@ extern "C" fn request_exit_on_signal(_signal: libc::c_int) {
 }
 
 fn install_signal_handlers() {
-    let handler = request_exit_on_signal as extern "C" fn(libc::c_int) as *const ()
-        as libc::sighandler_t;
+    let handler =
+        request_exit_on_signal as extern "C" fn(libc::c_int) as *const () as libc::sighandler_t;
     // SAFETY: the handler only stores to a static atomic, which is
     // async-signal-safe; registration happens before any thread observes it.
     unsafe {
@@ -1145,6 +1145,11 @@ fn boot(args: &Args, settings: &device::StageSettings) -> Result<(Guest, UiSurfa
 }
 
 fn main() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        return Err(anyhow!(
+            "pocket-stage requires macOS; use app-widget for Windows apps"
+        ));
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     install_signal_handlers();
     let args = parse_args()?;

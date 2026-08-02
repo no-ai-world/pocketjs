@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   deploySis,
   isExpectedMtpDevice,
@@ -44,7 +45,7 @@ import {
   stageSymbianMassStorageData,
 } from "./symbian-data.ts";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fileURLToPath(new URL("..", import.meta.url));
 
 async function spawn(
   command: string,

@@ -12,8 +12,9 @@ single-file components, run them on QuickJS, and let PocketJS move layout,
 styling, text and animation into a tiny `no_std` Rust core.
 
 It runs on real PSP and PS Vita hardware, PPSSPP, Vita3K, the browser (WASM),
-native macOS windows (wgpu) and headless Bun. Full design + contracts:
-[docs/DESIGN.md](./DESIGN.md). PocketJS is growing into a family of specialized
+native macOS and Windows 10 desktop windows (wgpu), and headless Bun. Full
+design + contracts: [docs/DESIGN.md](./DESIGN.md). PocketJS is growing into a
+family of specialized
 runtimes — Rust cores, spec-pinned surfaces, one QuickJS guest — documented
 in [docs/RUNTIMES.md](./RUNTIMES.md); the 3D base lives in
 [engine/pocket3d/](./pocket3d/), and its first game runtime is

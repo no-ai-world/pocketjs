@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { fileURLToPath } from "node:url";
 import { releaseNotes, releaseTitle } from "../tools/release-notes.ts";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fileURLToPath(new URL("..", import.meta.url));
 
 const FIXTURE = `# Changelog
 

@@ -45,6 +45,34 @@ function normalizeViewport(viewport: PocketManifestV2["app"]["viewport"]): {
 const within = (v: Viewport, min: Viewport, max: Viewport): boolean =>
   v[0] >= min[0] && v[1] >= min[1] && v[0] <= max[0] && v[1] <= max[1];
 
+export interface DynamicViewportBounds {
+  readonly min: Viewport;
+  readonly max: Viewport;
+}
+
+/** Intersect an app's dynamic range with the selected target's range. */
+export function resolveDynamicViewportBounds(
+  manifest: PocketManifestV2,
+  profile: TargetProfile,
+): DynamicViewportBounds | null {
+  const viewport = normalizeViewport(manifest.app.viewport);
+  const targetRange = profile.display.dynamicViewport;
+  if (!viewport.dynamic || !targetRange) return null;
+  const min = viewport.dynamic.min ?? targetRange.min;
+  const max = viewport.dynamic.max ?? targetRange.max;
+  if (min[0] > max[0] || min[1] > max[1]) return null;
+  const effectiveMin: Viewport = [
+    Math.max(min[0], targetRange.min[0]),
+    Math.max(min[1], targetRange.min[1]),
+  ];
+  const effectiveMax: Viewport = [
+    Math.min(max[0], targetRange.max[0]),
+    Math.min(max[1], targetRange.max[1]),
+  ];
+  if (effectiveMin[0] > effectiveMax[0] || effectiveMin[1] > effectiveMax[1]) return null;
+  return { min: effectiveMin, max: effectiveMax };
+}
+
 /**
  * Pick and validate the viewport variant the target's FORM calls for.
  * Window/widget forms take the app's `dynamic` variant (or its `fixed` one
@@ -70,11 +98,38 @@ function resolveViewport(
     const range = dynamicViewport;
     if (viewport.dynamic) {
       const size = viewport.dynamic.default;
+      const min = viewport.dynamic.min ?? range.min;
+      const max = viewport.dynamic.max ?? range.max;
       if (!within(size, range.min, range.max)) {
         diagnostics.push({
           code: "viewport.logicalUnsupported",
           path: "/app/viewport/dynamic/default",
           message: `target admits ${range.min[0]}x${range.min[1]} through ${range.max[0]}x${range.max[1]}, not ${size[0]}x${size[1]}`,
+        });
+        return null;
+      }
+      if (min[0] > max[0] || min[1] > max[1]) {
+        diagnostics.push({
+          code: "viewport.dynamicRangeInvalid",
+          path: "/app/viewport/dynamic",
+          message: `dynamic viewport minimum ${min[0]}x${min[1]} exceeds maximum ${max[0]}x${max[1]}`,
+        });
+        return null;
+      }
+      const effective = resolveDynamicViewportBounds(manifest, profile);
+      if (!effective) {
+        diagnostics.push({
+          code: "viewport.dynamicRangeUnsupported",
+          path: "/app/viewport/dynamic",
+          message: `app range ${min[0]}x${min[1]} through ${max[0]}x${max[1]} does not overlap the target range ${range.min[0]}x${range.min[1]} through ${range.max[0]}x${range.max[1]}`,
+        });
+        return null;
+      }
+      if (!within(size, effective.min, effective.max)) {
+        diagnostics.push({
+          code: "viewport.dynamicDefaultUnsupported",
+          path: "/app/viewport/dynamic/default",
+          message: `dynamic viewport range ${min[0]}x${min[1]} through ${max[0]}x${max[1]} does not contain ${size[0]}x${size[1]}`,
         });
         return null;
       }

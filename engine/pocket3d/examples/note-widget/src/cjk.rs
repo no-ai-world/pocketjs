@@ -28,16 +28,146 @@ fn slot_px(slot: u8) -> f32 {
     [12.0, 14.0, 16.0, 18.0, 20.0, 24.0, 36.0][(slot % 7) as usize]
 }
 
-/// System fonts that cover CJK, tried in order; the first whose face maps
-/// '中' wins. The file is mmapped — resident memory stays at the pages the
-/// rasterizer actually touches, not the collection's tens of MB.
-const FONT_CANDIDATES: &[&str] = &[
-    "/System/Library/Fonts/PingFang.ttc",
-    "/System/Library/Fonts/Hiragino Sans GB.ttc",
-    "/System/Library/Fonts/STHeiti Light.ttc",
-    "/System/Library/Fonts/Supplemental/Songti.ttc",
-    "/Library/Fonts/Arial Unicode.ttf",
+/// Preferred CJK-capable font *names* — never hardcode drive letters.
+/// Resolution joins these and discovered font files with OS font directories / env overrides.
+const PREFERRED_FONT_NAMES: &[&str] = &[
+    // Windows
+    "msyh.ttc",
+    "msyhbd.ttc",
+    "msyhl.ttc",
+    "simsun.ttc",
+    "simhei.ttf",
+    "malgun.ttf",
+    "YuGothM.ttc",
+    "YuGothR.ttc",
+    "msgothic.ttc",
+    "arialuni.ttf",
+    // macOS
+    "PingFang.ttc",
+    "Hiragino Sans GB.ttc",
+    "STHeiti Light.ttc",
+    "Songti.ttc",
+    "Arial Unicode.ttf",
+    // Linux common packages
+    "NotoSansCJK-Regular.ttc",
+    "NotoSansCJKsc-Regular.otf",
+    "SourceHanSansSC-Regular.otf",
+    "DroidSansFallbackFull.ttf",
+    "WenQuanYiMicroHei.ttf",
 ];
+
+/// Build candidate font files from env + OS font directories + preferred names.
+fn font_candidate_paths() -> Vec<std::path::PathBuf> {
+    // 按目录发现字体，不写死盘符路径
+    use std::path::PathBuf;
+
+    let mut paths = Vec::new();
+
+    // Explicit override wins: file or directory.
+    if let Ok(override_path) = std::env::var("POCKETJS_CJK_FONT") {
+        let p = PathBuf::from(override_path.trim());
+        if p.is_file() {
+            paths.push(p);
+        } else if p.is_dir() {
+            push_named_fonts(&mut paths, &p);
+        }
+    }
+
+    for dir in system_font_dirs() {
+        push_named_fonts(&mut paths, &dir);
+    }
+
+    // De-dupe while preserving order.
+    let mut seen = HashSet::new();
+    paths.retain(|p| seen.insert(p.clone()));
+    paths
+}
+
+/// OS font directories derived from env / well-known roots (no drive-letter font files).
+fn system_font_dirs() -> Vec<std::path::PathBuf> {
+    // 收集本机字体目录
+    use std::path::PathBuf;
+    let mut dirs = Vec::new();
+
+    if let Ok(windir) = std::env::var("WINDIR").or_else(|_| std::env::var("SystemRoot")) {
+        dirs.push(PathBuf::from(windir).join("Fonts"));
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        dirs.push(
+            PathBuf::from(local)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Fonts"),
+        );
+    }
+
+    // macOS roots are directory roots, not individual font files.
+    dirs.push(PathBuf::from("/System/Library/Fonts"));
+    dirs.push(PathBuf::from("/System/Library/Fonts/Supplemental"));
+    dirs.push(PathBuf::from("/Library/Fonts"));
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(&home).join("Library").join("Fonts"));
+        dirs.push(PathBuf::from(&home).join(".fonts"));
+        dirs.push(
+            PathBuf::from(&home)
+                .join(".local")
+                .join("share")
+                .join("fonts"),
+        );
+    }
+
+    // Linux
+    dirs.push(PathBuf::from("/usr/share/fonts"));
+    dirs.push(PathBuf::from("/usr/local/share/fonts"));
+
+    dirs.into_iter().filter(|d| d.is_dir()).collect()
+}
+
+const FONT_EXTENSIONS: &[&str] = &["ttf", "otf", "ttc", "otc"];
+
+/// Recognize font files accepted by the runtime fallback loader.
+fn is_font_file(path: &Path) -> bool {
+    // Keep directory overrides useful for custom font filenames.
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            let extension = extension.to_ascii_lowercase();
+            FONT_EXTENSIONS.iter().any(|known| *known == extension)
+        })
+        .unwrap_or(false)
+}
+
+/// Collect font files below a directory without following symlinked directories.
+fn collect_font_files(out: &mut Vec<std::path::PathBuf>, dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_file() && is_font_file(&path) {
+            out.push(path);
+        } else if file_type.is_dir() {
+            collect_font_files(out, &path);
+        }
+    }
+}
+
+/// Join preferred names and discovered font files under a font directory.
+fn push_named_fonts(out: &mut Vec<std::path::PathBuf>, dir: &Path) {
+    // Prefer known CJK filenames before scanning custom directory entries.
+    for name in PREFERRED_FONT_NAMES {
+        let direct = dir.join(name);
+        if direct.is_file() {
+            out.push(direct);
+        }
+    }
+    collect_font_files(out, dir);
+}
 
 struct GlyphSource {
     map: memmap2::Mmap,
@@ -46,11 +176,11 @@ struct GlyphSource {
 
 impl GlyphSource {
     fn find() -> Option<(GlyphSource, String)> {
-        for path in FONT_CANDIDATES {
-            if !Path::new(path).exists() {
+        for path in font_candidate_paths() {
+            if !path.is_file() {
                 continue;
             }
-            let Ok(file) = std::fs::File::open(path) else {
+            let Ok(file) = std::fs::File::open(&path) else {
                 continue;
             };
             let Ok(map) = (unsafe { memmap2::Mmap::map(&file) }) else {
@@ -61,7 +191,10 @@ impl GlyphSource {
                     break;
                 };
                 if font.glyph_id('中').0 != 0 {
-                    return Some((GlyphSource { map, index }, format!("{path}#{index}")));
+                    return Some((
+                        GlyphSource { map, index },
+                        format!("{}#{index}", path.display()),
+                    ));
                 }
             }
         }
@@ -214,7 +347,9 @@ impl SlotAtlas {
 
 /// All of a pak's font slots + the system fallback face.
 pub struct CjkAtlases {
+    /// Lazily opened on first non-ASCII ensure — Latin-only apps skip mmap.
     source: Option<GlyphSource>,
+    source_resolved: bool,
     slots: Vec<SlotAtlas>,
 }
 
@@ -225,17 +360,31 @@ impl CjkAtlases {
             .filter(|e| e.key.starts_with("ui:font."))
             .filter_map(|e| SlotAtlas::parse(e.blob))
             .collect();
-        let source = match GlyphSource::find() {
+        CjkAtlases {
+            source: None,
+            source_resolved: false,
+            slots,
+        }
+    }
+
+    /// Open the system CJK face on first non-ASCII ensure.
+    fn resolve_source(&mut self) {
+        if self.source_resolved {
+            return;
+        }
+        self.source_resolved = true;
+        self.source = match GlyphSource::find() {
             Some((source, name)) => {
                 log::info!("note-widget: CJK fallback font {name}");
                 Some(source)
             }
             None => {
-                log::warn!("note-widget: no CJK-capable system font found — non-Latin input will tofu");
+                log::warn!(
+                    "note-widget: no CJK-capable system font found — non-Latin input will tofu"
+                );
                 None
             }
         };
-        CjkAtlases { source, slots }
     }
 
     /// Make sure every non-ASCII codepoint in `text` exists in every slot.
@@ -253,6 +402,7 @@ impl CjkAtlases {
         if missing.is_empty() {
             return Vec::new();
         }
+        self.resolve_source();
         let Some(font) = self.source.as_ref().and_then(|s| s.font()) else {
             return Vec::new();
         };
@@ -277,5 +427,20 @@ impl CjkAtlases {
             );
         }
         blobs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_font_file;
+    use std::path::Path;
+
+    #[test]
+    fn recognizes_common_font_extensions_case_insensitively() {
+        // Directory overrides must accept custom filenames.
+        assert!(is_font_file(Path::new("custom.ttf")));
+        assert!(is_font_file(Path::new("custom.OTC")));
+        assert!(!is_font_file(Path::new("custom.txt")));
+        assert!(!is_font_file(Path::new("custom")));
     }
 }

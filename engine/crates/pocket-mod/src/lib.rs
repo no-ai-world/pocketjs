@@ -108,13 +108,14 @@ impl Guest {
         Ok(())
     }
 
-    /// One guest turn with touch contacts. `touches` packs each contact as
-    /// `(id << 18) | (y << 9) | x` (framework/src/touch.ts): 9 bits per axis
-    /// (so logical coordinates must be ≤ 511), 8 bits of id, up to 8 contacts.
-    /// A contact present in the array is down/move this frame; absent = released.
-    /// Hosts without touch call [`Guest::frame`] / [`Guest::frame_with_analog`]
-    /// instead; this is the 3-arg `globalThis.frame(buttons, analog, touches)`
-    /// path for touch targets (Vita, PocketBook).
+    /// One guest turn with touch contacts and the optional desktop pointer
+    /// marker. `touches` accepts the legacy `(id << 18) | (y << 9) | x` form
+    /// and the wide touch form defined by `framework/src/touch.ts`; a contact
+    /// present in the array is down/move this frame and an absent contact is
+    /// released. The desktop marker is decoded by the framework as a hover
+    /// pointer position and is not exposed through `touches()`. Hosts without
+    /// touch call [`Guest::frame`] / [`Guest::frame_with_analog`] instead; this
+    /// is the 3-arg `globalThis.frame(buttons, analog, touches)` path.
     pub fn frame_with_touches(&self, buttons: u32, analog: u32, touches: &[u32]) -> Result<()> {
         self.ctx.with(|ctx| -> Result<()> {
             let frame: Option<Function> = ctx.globals().get("frame").ok();

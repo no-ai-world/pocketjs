@@ -13,8 +13,9 @@ import { $ } from "bun";
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { createServer } from "node:net";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 
-const pspUiDir = new URL("..", import.meta.url).pathname;
+const pspUiDir = fileURLToPath(new URL("..", import.meta.url));
 const PRX = "host0:/pocketjs-psp.prx";
 const MAIN_SUFFIX = "-main.tsx";
 

@@ -41,14 +41,27 @@ import { analogX, analogY } from "./frame.ts";
 import { getHost, getOps, hostViewport, type HostOps } from "./host.ts";
 import { get as pakGet } from "./pak.ts";
 import type { NodeMirror } from "./renderer.ts";
+import { hasFeature } from "./platform.ts";
+import { pointerPosition } from "./touch.ts";
 
 let root: NodeMirror | null = null;
 let focused: NodeMirror | null = null;
+let focusRestoreCandidate: NodeMirror | null = null;
 let pressedNode: NodeMirror | null = null;
+/** Desktop/touch press target retained across pointer leave and re-entry. */
+let pointerPressTarget: NodeMirror | null = null;
+/** Node whose focus was established by the desktop pointer hover. */
+let pointerHoverFocus: NodeMirror | null = null;
 let prevButtons = 0;
 const focusScopeStack: NodeMirror[] = [];
 const focusGridStack: FocusGridRegistration[] = [];
 const focusControllerStack: FocusControllerRegistration[] = [];
+
+export type FocusChangeListener = (
+  previous: NodeMirror | null,
+  next: NodeMirror | null,
+) => void;
+const focusChangeListeners = new Set<FocusChangeListener>();
 
 /** Bind the focus manager to a mirror tree root (index.ts render()). The
  *  cursor SURVIVES a rebind (enableCursor at module top runs before mount);
@@ -58,9 +71,12 @@ const focusControllerStack: FocusControllerRegistration[] = [];
  *  texture slot would leak; on a genuinely fresh core the stale handle
  *  no-ops (generation-tagged). */
 export function setInputRoot(r: NodeMirror | null): void {
+  if (focused || pressedNode) focusNode(null);
   root = r;
-  focused = null;
+  focusRestoreCandidate = null;
   pressedNode = null;
+  pointerPressTarget = null;
+  pointerHoverFocus = null;
   prevButtons = 0;
   focusScopeStack.length = 0;
   focusGridStack.length = 0;
@@ -104,13 +120,46 @@ export function registerFocusable(node: NodeMirror, on: boolean): void {
   }
 }
 
+/** 标记焦点角色：action 走 onPress；editable 吞文本键。 */
+export function registerFocusKind(
+  node: NodeMirror,
+  kind: "action" | "editable" | undefined,
+): void {
+  node.focusKind = kind;
+  __notifyTreeMutation();
+}
+
 // ---- focus ------------------------------------------------------------------
+
+/** Register a listener for focus lifecycle transitions. */
+export function onFocusChange(listener: FocusChangeListener): () => void {
+  // Keep lifecycle observers removable without exposing the focus store.
+  focusChangeListeners.add(listener);
+  let disposed = false;
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    focusChangeListeners.delete(listener);
+  };
+}
 
 /** Programmatic focus (also used internally). null clears. */
 export function focusNode(node: NodeMirror | null): void {
+  // Update focus and notify lifecycle observers.
+  focusRestoreCandidate = null;
+  if (node === null) {
+    pointerPressTarget = null;
+    pointerHoverFocus = null;
+  } else if (node !== pointerHoverFocus) {
+    pointerHoverFocus = null;
+  }
   if (pressedNode && pressedNode !== node) setPressedNode(null);
+  const previous = focused;
   focused = node;
   getOps().setFocus(node ? node.id : 0);
+  if (previous !== node) {
+    for (const listener of [...focusChangeListeners]) listener(previous, node);
+  }
 }
 
 /** Hold/clear the `active:` variant on a node (stale ids no-op core-side). */
@@ -122,8 +171,29 @@ function setPressedNode(node: NodeMirror | null): void {
   if (node) ops.setActive?.(node.id, 1);
 }
 
+/** Clear pointer hover without canceling an active pointer press owner. */
+export function clearPointerHover(): void {
+  pointerHoverFocus = null;
+  setPressedNode(null);
+  if (pointerPressTarget === null) focusNode(null);
+}
+
 export function getFocused(): NodeMirror | null {
   return focused;
+}
+
+/** Clear host focus while retaining a valid node for focus restoration. */
+export function blurFocus(): void {
+  const previous = focused;
+  focusNode(null);
+  focusRestoreCandidate = previous && focusables().includes(previous) ? previous : null;
+}
+
+/** Restore the node that lost focus with the native window. */
+export function restoreFocus(): void {
+  const candidate = focusRestoreCandidate;
+  focusRestoreCandidate = null;
+  if (candidate && focusables().includes(candidate)) focusNode(candidate);
 }
 
 function activeFocusRoot(): NodeMirror | null {
@@ -168,6 +238,27 @@ function moveLinearFocus(direction: FocusDirection): void {
   const j = i + dir;
   if (j < 0 || j >= list.length) return; // clamp at the ends
   focusNode(list[j]);
+}
+
+/** Tab / Shift+Tab：按文档序在 focusable 间循环。 */
+export function moveFocusByTab(dir: 1 | -1): void {
+  const list = focusables();
+  if (list.length === 0) {
+    if (focused) focusNode(null);
+    return;
+  }
+  const i = focused ? list.indexOf(focused) : -1;
+  if (i < 0) {
+    focusNode(dir === 1 ? list[0]! : list[list.length - 1]!);
+    return;
+  }
+  const j = (i + dir + list.length) % list.length;
+  focusNode(list[j]!);
+}
+
+/** 当前焦点是否为可编辑字段。 */
+export function isEditableFocused(): boolean {
+  return focused?.focusKind === "editable";
 }
 
 export interface FocusGridOptions {
@@ -521,7 +612,8 @@ export function enableCursor(opts: CursorOptions = {}): () => void {
   const prev = cursor;
   // An in-flight press does not survive reconfiguration (the release edge
   // may be watching a different button afterwards — never strand `active:`).
-  if (prev?.pressTarget) setPressedNode(null);
+  if (prev?.pressTarget || pointerPressTarget) setPressedNode(null);
+  pointerPressTarget = null;
   const sprite: CursorSprite = {
     image: opts.image,
     hotspot: opts.hotspot ?? [0, 0],
@@ -555,6 +647,7 @@ export function enableCursor(opts: CursorOptions = {}): () => void {
 }
 
 function disableCursor(): void {
+  pointerPressTarget = null;
   if (!cursor) return;
   const c = cursor;
   cursor = null;
@@ -760,7 +853,13 @@ export function handleFrame(buttons: number): void {
   const released = prevButtons & ~buttons;
   prevButtons = buttons;
   if (cursor && cursorFrame(buttons, pressed, released)) return;
-  if (released & BTN.CIRCLE) setPressedNode(null);
+  // Desktop pointer hosts pack the OS cursor as one wide touch contact + CIRCLE.
+  // Gate on input.pointer so Vita multi-touch + buttons still use d-pad/touch paths.
+  if (hasFeature("input.pointer") && pointerContactFrame(buttons, pressed, released)) return;
+  if (released & BTN.CIRCLE) {
+    pointerPressTarget = null;
+    setPressedNode(null);
+  }
   if (pressed === 0) return;
   if (pressed & BTN.DOWN) moveFocus("down");
   if (pressed & BTN.RIGHT) moveFocus("right");
@@ -770,4 +869,53 @@ export function handleFrame(buttons: number): void {
     setPressedNode(focused);
     firePress();
   }
+}
+
+/** Real-pointer frame for hosts that pack the OS cursor as a touch contact. */
+function pointerContactFrame(buttons: number, pressed: number, released: number): boolean {
+  // Desktop hosts keep hover position in a separate pointer snapshot. Never
+  // reinterpret a touch contact as a mouse pointer when that snapshot is
+  // absent; touch gestures have their own public API and lifecycle.
+  const pointer = pointerPosition();
+  if (!pointer) {
+    // Leaving the window cancels the active visual but retains the press
+    // target until release, so re-entry follows the documented cursor model.
+    const hadPressTarget = pointerPressTarget !== null;
+    const hadPointerState = hadPressTarget || pointerHoverFocus !== null;
+    const shouldClearHover =
+      pointerHoverFocus !== null &&
+      !hadPressTarget &&
+      focused === pointerHoverFocus;
+    if (released & BTN.CIRCLE) pointerPressTarget = null;
+    setPressedNode(null);
+    if ((shouldClearHover || (released & BTN.CIRCLE && hadPressTarget)) && focused) {
+      focusNode(null);
+    }
+    // A missing pointer must not fall through to CIRCLE while stale pointer
+    // state exists; without pointer-owned state, ordinary button input remains valid.
+    return (
+      hadPointerState &&
+      ((buttons & BTN.CIRCLE) !== 0 || (released & BTN.CIRCLE) !== 0)
+    );
+  }
+  const contact = pointer;
+  const target = hitFocusable(contact.x, contact.y);
+  const preservingPress = pointerPressTarget !== null && (buttons & BTN.CIRCLE) !== 0;
+  // Keep the original editable focused during a held native drag. The shell's
+  // mouse capture and TextInput's selection state are independent of hover.
+  if (!preservingPress && target !== focused) focusNode(target);
+  if (!preservingPress) pointerHoverFocus = target;
+  if (pressed & BTN.CIRCLE && target) {
+    pointerPressTarget = target;
+  }
+  if (released & BTN.CIRCLE) {
+    const fire = pointerPressTarget !== null && target === pointerPressTarget;
+    pointerPressTarget = null;
+    setPressedNode(null);
+    if (fire) firePress();
+  } else if (pointerPressTarget) {
+    // Leave cancels active styling; re-entry restores it before release.
+    setPressedNode(target === pointerPressTarget ? pointerPressTarget : null);
+  }
+  return true;
 }

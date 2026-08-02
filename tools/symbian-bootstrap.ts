@@ -7,6 +7,7 @@ import {
   rmSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   type PinnedDownload,
   SYMBIAN_SETUP_DOWNLOADS,
@@ -19,7 +20,7 @@ import {
 } from "./symbian-toolchain.ts";
 import { pocketStackCacheRoot, withArtifactLock } from "./psp-toolchain.ts";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fileURLToPath(new URL("..", import.meta.url));
 
 async function sha256File(path: string): Promise<string> {
   const hash = createHash("sha256");

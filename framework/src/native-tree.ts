@@ -3,7 +3,13 @@
 
 import { NODE_TYPE, PROP, ROOT_ID, STYLE_ID_NONE, type PropName } from "../../contracts/spec/spec.ts";
 import { encodePropValue, getHost, getOps } from "./host.ts";
-import { __notifyTreeMutation, notifyDetached, registerFocusable, registerPress } from "./input.ts";
+import {
+  __notifyTreeMutation,
+  notifyDetached,
+  registerFocusKind,
+  registerFocusable,
+  registerPress,
+} from "./input.ts";
 
 export interface NodeMirror {
   /** Native generation-tagged node id. */
@@ -24,6 +30,8 @@ export interface NodeMirror {
   domData?: string;
   /** Focus traversal membership (input.ts). */
   focusable?: boolean;
+  /** action=按钮；editable=输入字段（文本键只进 editable）。 */
+  focusKind?: "action" | "editable";
   /** CIRCLE handler while focused (input.ts). */
   onPress?: (() => void) | undefined;
   /** DevTools semantic name (`debugName` prop / <Named> wrapper). */
@@ -75,6 +83,7 @@ const NATIVE_ATTRIBUTE_NAMES = new Set([
   "onPress",
   "on:press",
   "focusable",
+  "focusKind",
   "debugName",
   "ref",
   "nodeRef",
@@ -620,6 +629,14 @@ export function setProp<T>(node: NodeMirror, name: string, value: T, prev?: T): 
       return value;
     case "focusable":
       registerFocusable(node, !!value);
+      return value;
+    case "focusKind":
+      registerFocusKind(
+        node,
+        value === "editable" || value === "action"
+          ? (value as "editable" | "action")
+          : undefined,
+      );
       return value;
     case "debugName":
       setDebugName(node, value == null ? undefined : String(value));

@@ -43,6 +43,7 @@ import { registerStyles, resolveStyle } from "./styles.ts";
 import { handleFrame, setHitRoot, setInputRoot } from "./input.ts";
 import { __setAnalog, resetFrameHooks, runFrameHooks } from "./frame.ts";
 import { __resetTouches, __setTouches } from "./touch.ts";
+import { resetHostInputBuffer } from "./host-input.ts";
 import { __advanceClock, resetClock } from "./clock.ts";
 import { __drainEffects, resetEffects } from "./effects.ts";
 import { entries as pakEntries, get as pakGet, hasPack, loadPack } from "./pak.ts";
@@ -249,6 +250,7 @@ export function render(code: () => unknown, opts: RenderOptions = {}): () => voi
 
   setInputRoot(appRoot);
   setHitRoot(rootMirror); // hit tests see the overlay layer too
+  resetHostInputBuffer();
   resetFrameHooks();
   resetClock(); // latches the host's __simHz clock policy (docs/DETERMINISM.md)
   resetEffects();

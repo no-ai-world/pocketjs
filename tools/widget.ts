@@ -16,7 +16,9 @@
 // M ≪ N.
 import { $ } from "bun";
 import { mkdirSync, readFileSync } from "node:fs";
+import { platform } from "node:os";
 import { resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import { demoManifestFor } from "./demo-identity.ts";
 import {
   POCKET_CAPABILITIES,
@@ -26,7 +28,8 @@ import {
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
 import type { ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fileURLToPath(new URL("..", import.meta.url));
+const engineRoot = resolvePath(root, "engine");
 
 /** Transitional embedded target shared by the bundled PSP and iPod stages. */
 export const STAGE_TARGET_ID = "macos-embedded";
@@ -170,6 +173,17 @@ export interface WidgetArgs {
 
 const LAUNCHER_OWNED_RUNTIME_FLAGS = ["--app", "--js", "--pak", "--profile"] as const;
 
+/** Reject Pocket Stage launches on hosts without the macOS stage contract. */
+export function assertWidgetStagePlatform(
+  currentPlatform: ReturnType<typeof platform> = platform(),
+): void {
+  if (currentPlatform !== "darwin") {
+    throw new Error(
+      `pocket-stage: ${STAGE_TARGET_ID} requires darwin (current OS: ${currentPlatform})`,
+    );
+  }
+}
+
 export function validateWidgetArgs(args: WidgetArgs): void {
   const runtimeOverride = args.pass.find((arg) =>
     LAUNCHER_OWNED_RUNTIME_FLAGS.some(
@@ -245,6 +259,7 @@ export function stagePlanPath(stage: WidgetStage, app: string): string {
 }
 
 async function main(): Promise<void> {
+  assertWidgetStagePlatform();
   const parsed = parseWidgetArgs(process.argv.slice(2));
   validateWidgetArgs(parsed);
   const { stage, app, proof, pass } = parsed;
@@ -267,9 +282,9 @@ async function main(): Promise<void> {
   // target-flavored bundles in dist/ proper are never picked up by mistake.
   const stageDist = resolvePath(root, "dist", `stage-${stage}`);
   await $`bun tools/build.ts --plan=${planPath} --project-root=${root} --outdir=${stageDist}`.cwd(root);
-  await $`cargo build --release -p pocket-stage`.cwd(`${root}pocket3d`);
+  await $`cargo build --release -p pocket-stage`.cwd(engineRoot);
 
-  const bin = `${root}engine/pocket3d/target/release/pocket-stage`;
+  const bin = resolvePath(engineRoot, "target", "release", "pocket-stage");
   const env = {
     ...process.env,
     RUST_LOG: process.env.RUST_LOG ?? "info",

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { fileURLToPath } from "node:url";
 import {
   generatePocketManifestV2Schema,
   POCKET_MANIFEST_SCHEMA_ID,
@@ -18,12 +19,16 @@ import {
 import { verifyPlanHash } from "../framework/src/manifest/plan.ts";
 import {
   resolveBuildPlan,
+  resolveDynamicViewportBounds,
   validateAndResolveBuildPlan,
   validatePlatformContractRegistry,
 } from "../framework/src/manifest/resolve.ts";
 import { validatePocketManifest } from "../framework/src/manifest/validate.ts";
+import { assertDesktopTargetPlatform } from "../tools/desktop-target.ts";
 
 const fixtureUrl = (name: string) => new URL(`./fixtures/manifests/${name}.json`, import.meta.url);
+const fixtureText = async (url: URL): Promise<string> =>
+  (await Bun.file(url).text()).replaceAll("\r\n", "\n");
 const portableInput: unknown = await Bun.file(fixtureUrl("portable-psp")).json();
 const invalidExtraInput: unknown = await Bun.file(fixtureUrl("invalid-extra-field")).json();
 const touchInput: unknown = await Bun.file(fixtureUrl("requires-touch")).json();
@@ -76,7 +81,7 @@ describe("pocket.json v2 schema", () => {
   });
 
   test("committed JSON Schema is byte-exact with the TypeScript source", async () => {
-    const committed = await Bun.file(new URL("../contracts/schema/pocket-2.json", import.meta.url)).text();
+    const committed = await fixtureText(new URL("../contracts/schema/pocket-2.json", import.meta.url));
     expect(committed).toBe(generatePocketManifestV2Schema());
   });
 
@@ -141,7 +146,14 @@ describe("pocket.json v2 schema", () => {
 
 describe("platform registry", () => {
   test("production advertises only the truthful stock-host profiles", () => {
-    expect(Object.keys(POCKET_TARGETS)).toEqual(["psp", "vita", "pocketbook", "macos-widget"]);
+    expect(Object.keys(POCKET_TARGETS)).toEqual([
+      "psp",
+      "vita",
+      "pocketbook",
+      "macos-widget",
+      "windows-app",
+      "windows-widget",
+    ]);
     expect(validatePlatformContractRegistry(POCKET_PLATFORM_CONTRACTS)).toEqual([]);
     expect(POCKET_TARGETS.psp.capabilities).toEqual([
       "input.analog.left",
@@ -192,6 +204,9 @@ describe("platform registry", () => {
       min: [240, 180],
       max: [4096, 4096],
     });
+    expect(POCKET_TARGETS["windows-app"].platform).toBe("windows");
+    expect(POCKET_TARGETS["windows-app"].form).toBe("window");
+    expect(POCKET_TARGETS["windows-app"].display.dynamicViewport?.acceptsFixed).toBe(true);
   });
 
   test("TargetId and capability registries extend without changing the resolver", () => {
@@ -222,6 +237,22 @@ describe("platform registry", () => {
       path: "/targets/macos-widget/display",
       message: "widget-form targets must declare display.dynamicViewport",
     });
+  });
+});
+
+describe("native desktop target validation", () => {
+  test("rejects a target on the wrong native OS", () => {
+    expect(() => assertDesktopTargetPlatform("windows-app", "darwin")).toThrow(
+      "windows-app requires win32",
+    );
+    expect(() => assertDesktopTargetPlatform("windows-widget", "darwin")).toThrow(
+      "windows-widget requires win32",
+    );
+    expect(() => assertDesktopTargetPlatform("macos-widget", "win32")).toThrow(
+      "macos-widget requires darwin",
+    );
+    expect(() => assertDesktopTargetPlatform("windows-app", "win32")).not.toThrow();
+    expect(() => assertDesktopTargetPlatform("macos-widget", "darwin")).not.toThrow();
   });
 });
 
@@ -287,7 +318,7 @@ describe("semantic resolution", () => {
     const result = validateAndResolveBuildPlan(manifest, { target: "macos-widget" });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.plan.target).toEqual({ id: "macos-widget", hostAbi: 3 });
+    expect(result.plan.target).toEqual({ id: "macos-widget", hostAbi: 4 });
     // Dynamic-viewport native presentation: density from the profile.
     expect(result.plan.viewport.rasterDensity).toBe(2);
     expect(result.plan.viewport.logical).toEqual([420, 560]);
@@ -311,6 +342,36 @@ describe("semantic resolution", () => {
     expect(onPsp.plan.features["input.pointer"]).toBe(false);
   });
 
+  test("windows-app is a window-form target and admits fixed apps", async () => {
+    const manifest = await Bun.file(new URL("../apps/form/pocket.json", import.meta.url)).json();
+    const result = validateAndResolveBuildPlan(manifest, { target: "windows-app" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.target).toEqual({ id: "windows-app", hostAbi: 4 });
+    expect(result.plan.viewport.logical).toEqual([480, 360]);
+    expect(result.plan.features["input.pointer"]).toBe(true);
+    // The target profile is a nominal baseline; dynamic app manifests choose
+    // their own default as long as it remains inside the intersected bounds.
+    expect(POCKET_TARGETS["windows-app"].display.logicalViewports).toEqual([[480, 320]]);
+
+    const bounds = resolveDynamicViewportBounds(manifest, POCKET_TARGETS["windows-app"]);
+    expect(bounds).toEqual({ min: [320, 240], max: [960, 720] });
+    const broad = structuredClone(manifest) as any;
+    broad.app.viewport.dynamic.min = [100, 100];
+    broad.app.viewport.dynamic.max = [5000, 5000];
+    expect(resolveDynamicViewportBounds(broad, POCKET_TARGETS["windows-app"])).toEqual({
+      min: [240, 180],
+      max: [4096, 4096],
+    });
+
+    const dual = structuredClone(manifest) as any;
+    dual.app.viewport.fixed = { logical: [480, 320], presentation: "native" };
+    const dualResult = validateAndResolveBuildPlan(dual, { target: "windows-app" });
+    expect(dualResult.ok).toBe(true);
+    if (!dualResult.ok) return;
+    expect(dualResult.plan.viewport.logical).toEqual([480, 360]);
+  });
+
   test("dynamic viewport admits in-range sizes and rejects out-of-range", async () => {
     const manifest = await Bun.file(new URL("../apps/note/pocket.json", import.meta.url)).json();
     const tiny = structuredClone(manifest) as any;
@@ -323,6 +384,22 @@ describe("semantic resolution", () => {
     const roomy = structuredClone(manifest) as any;
     roomy.app.viewport.dynamic.default = [800, 600];
     expect(validateAndResolveBuildPlan(roomy, { target: "macos-widget" }).ok).toBe(true);
+
+    const outsideAppRange = structuredClone(manifest) as any;
+    outsideAppRange.app.viewport.dynamic.min = [500, 300];
+    outsideAppRange.app.viewport.dynamic.max = [700, 500];
+    const defaultOutside = validateAndResolveBuildPlan(outsideAppRange, { target: "macos-widget" });
+    expect(defaultOutside.ok).toBe(false);
+    if (defaultOutside.ok) return;
+    expect(defaultOutside.diagnostics.map((d) => d.code)).toContain("viewport.dynamicDefaultUnsupported");
+
+    const inverted = structuredClone(manifest) as any;
+    inverted.app.viewport.dynamic.min = [800, 600];
+    inverted.app.viewport.dynamic.max = [700, 500];
+    const invalidRange = validateAndResolveBuildPlan(inverted, { target: "macos-widget" });
+    expect(invalidRange.ok).toBe(false);
+    if (invalidRange.ok) return;
+    expect(invalidRange.diagnostics.map((d) => d.code)).toContain("viewport.dynamicRangeInvalid");
   });
 
   test("every committed demo manifest lands on the expected admission matrix", async () => {
@@ -348,6 +425,7 @@ describe("semantic resolution", () => {
       motions: [true, true, false],
       music: [true, true, false],
       note: [false, false, true],
+      form: [false, false, true],
       notifications: [true, true, false],
       settings: [true, true, false],
       stats: [true, true, false],
@@ -420,7 +498,7 @@ describe("semantic resolution", () => {
 
   test("stock-demo builds prefer the demo's own manifest over synthesis", async () => {
     const { demoManifestFor } = await import("../tools/demo-identity.ts");
-    const root = new URL("../", import.meta.url).pathname;
+    const root = fileURLToPath(new URL("../", import.meta.url));
     const im = demoManifestFor(root, "im") as any;
     expect(im.id).toBe("dev.pocket-stack.im");
     expect(im.app.output).toBe("im-main");
@@ -435,9 +513,9 @@ describe("semantic resolution", () => {
     const result = validateAndResolveBuildPlan(portableInput, { target: "psp" });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const committed = await Bun.file(
+    const committed = await fixtureText(
       new URL("./fixtures/plans/portable-psp.plan.json", import.meta.url),
-    ).text();
+    );
     expect(JSON.stringify(result.plan, null, 2) + "\n").toBe(committed);
   });
 
@@ -457,9 +535,9 @@ describe("semantic resolution", () => {
       "input.buttons": true,
       "text.glyphs.baked": true,
     });
-    const committed = await Bun.file(
+    const committed = await fixtureText(
       new URL("./fixtures/plans/portable-vita.plan.json", import.meta.url),
-    ).text();
+    );
     expect(JSON.stringify(result.plan, null, 2) + "\n").toBe(committed);
   });
 

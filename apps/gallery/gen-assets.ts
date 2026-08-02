@@ -10,10 +10,11 @@
 // (colorType 6, bitDepth 8, filter 0, single node:zlib IDAT).
 
 import { deflateSync } from "node:zlib";
+import { fileURLToPath } from "node:url";
 import { decodePng } from "../../framework/compiler/pak.ts";
 import { PALETTES, PRELUDE, SHADERS, TILES } from "./shaders.ts";
 
-const HERE = new URL(".", import.meta.url).pathname; // apps/gallery/
+const HERE = fileURLToPath(new URL(".", import.meta.url)); // apps/gallery/
 const FRAME_RENDER = 128; // per-frame render size (2x supersampled)
 const FRAME = 64; // per-frame final size (pow2 cell)
 const FRAMES = 8; // animation frames per cover (a seamless loop)

@@ -2,10 +2,11 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { emitSingleLodStagePackage } from "../site/stage-package.ts";
 import { BTN, PocketHost } from "../site/playground/host.js";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const PACKAGE = ROOT + "engine/pocket3d/examples/handheld/assets/dibad-psp/";
 
 function glbJson(path: string): any {

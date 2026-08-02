@@ -30,6 +30,7 @@
 // whitespace exercises the solid-tile path and costs 8 directory bytes.
 
 import { mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { encodeTilesetEntry, keyTileset, type TilesetTile } from "../../framework/compiler/pak.ts";
 import {
   TILESET_DIR_ENTRY_SIZE,
@@ -40,7 +41,7 @@ import {
   packbitsDecode,
 } from "../../contracts/spec/spec.ts";
 
-const HERE = new URL(".", import.meta.url).pathname; // apps/zoomlab/
+const HERE = fileURLToPath(new URL(".", import.meta.url)); // apps/zoomlab/
 const TILE = 256;
 const SCREEN_W = 480; // PSP screen — the overview level must fit inside it
 const SCREEN_H = 272;

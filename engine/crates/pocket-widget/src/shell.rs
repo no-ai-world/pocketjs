@@ -21,9 +21,10 @@
 //!   The natural shape for text-first widgets (notes, tickers, boards).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use glam::Vec2;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -37,6 +38,38 @@ use pocket3d::hud::Hud;
 use pocket3d::input::Input;
 use pocket3d::renderer::Renderer;
 use pocket3d::scene::Scene;
+
+/// Effective window transparency after surface configuration.
+///
+/// Single-window widget hosts only. `None` until a surface is configured.
+/// In-process launchers/tests read [`display_transparent`]; cross-process
+/// parents can grep the stable log line `pocket-widget: display_transparent=`.
+static DISPLAY_TRANSPARENT: AtomicU8 = AtomicU8::new(0); // 0 unknown, 1 opaque, 2 transparent
+
+/// 读取本进程 widget shell 实际生效的透明合成结果。
+pub fn display_transparent() -> Option<bool> {
+    // 供同进程 launcher/测试查询
+    match DISPLAY_TRANSPARENT.load(Ordering::Relaxed) {
+        1 => Some(false),
+        2 => Some(true),
+        _ => None,
+    }
+}
+
+/// 测试/重入 boot 前清空透明状态。
+pub fn clear_display_transparent() {
+    // 恢复 unknown，避免串测粘滞
+    DISPLAY_TRANSPARENT.store(0, Ordering::Relaxed);
+}
+
+fn set_display_transparent(value: bool) {
+    // 单线程 boot 路径写入一次，并打可 grep 的稳定日志
+    DISPLAY_TRANSPARENT.store(if value { 2 } else { 1 }, Ordering::Relaxed);
+    log::info!(
+        "pocket-widget: display_transparent={}",
+        if value { 1 } else { 0 }
+    );
+}
 
 pub struct WidgetConfig {
     pub title: String,
@@ -56,6 +89,8 @@ pub struct WidgetConfig {
     pub resizable: bool,
     /// Logical px floor enforced by the OS while `resizable`.
     pub min_size: (u32, u32),
+    /// Optional logical px ceiling enforced by the OS while `resizable`.
+    pub max_size: Option<(u32, u32)>,
     /// Enable OS text composition (IME). Composition arrives on the input's
     /// `ime_events` stream; the game reports its caret rect through
     /// `ime_cursor_area` so candidate windows dock next to the text.
@@ -74,6 +109,7 @@ impl Default for WidgetConfig {
             always_on_top: true,
             resizable: false,
             min_size: (160, 120),
+            max_size: None,
             ime: false,
         }
     }
@@ -132,12 +168,7 @@ pub trait FlatWidget {
     fn take_dirty(&mut self) -> bool;
     /// Draw into the swapchain view (submit your own encoder). Called only
     /// on frames that render.
-    fn render(
-        &mut self,
-        gpu: &Gpu,
-        view: &wgpu::TextureView,
-        window_px: (u32, u32),
-    ) -> Result<()>;
+    fn render(&mut self, gpu: &Gpu, view: &wgpu::TextureView, window_px: (u32, u32)) -> Result<()>;
     /// Left-press policy: OS window drag (move) at this cursor position?
     fn drag_at(&mut self, cursor: Vec2) -> bool {
         let _ = cursor;
@@ -151,8 +182,8 @@ pub trait FlatWidget {
         false
     }
     /// The caret rect in PHYSICAL px (x, y, w, h) — where the OS should
-    /// dock IME candidate windows. Polled after ticks; None leaves the
-    /// last placement.
+    /// dock IME candidate windows. Polled after ticks; None clears the
+    /// previous placement.
     fn ime_cursor_area(&mut self) -> Option<(f32, f32, f32, f32)> {
         None
     }
@@ -163,7 +194,13 @@ pub trait FlatWidget {
 
 /// Run a 3D widget (scene + camera + demand rendering).
 pub fn run(config: WidgetConfig, game: impl WidgetGame) -> Result<()> {
-    run_driver(config, SceneDriver { game, renderer: None })
+    run_driver(
+        config,
+        SceneDriver {
+            game,
+            renderer: None,
+        },
+    )
 }
 
 /// Run a 2D widget (the window is the surface).
@@ -276,7 +313,24 @@ impl<G: FlatWidget> Driver for FlatDriver<G> {
     }
 }
 
+/// Reject a window configuration whose resize bounds cannot be represented safely.
+fn validate_config(config: &WidgetConfig) -> Result<()> {
+    if let Some((max_width, max_height)) = config.max_size
+        && (config.min_size.0 > max_width || config.min_size.1 > max_height)
+    {
+        return Err(anyhow!(
+            "window minimum {}x{} exceeds maximum {}x{}",
+            config.min_size.0,
+            config.min_size.1,
+            max_width,
+            max_height
+        ));
+    }
+    Ok(())
+}
+
 fn run_driver(config: WidgetConfig, driver: impl Driver) -> Result<()> {
+    validate_config(&config)?;
     let event_loop = EventLoop::new()?;
     let mut app = WidgetApp {
         config,
@@ -374,12 +428,15 @@ impl<D: Driver> WidgetApp<D> {
                 self.config.min_size.0,
                 self.config.min_size.1,
             ));
+            if let Some((width, height)) = self.config.max_size {
+                attrs = attrs.with_max_inner_size(winit::dpi::LogicalSize::new(width, height));
+            }
         }
         let window = Arc::new(event_loop.create_window(attrs)?);
         if self.config.ime {
             window.set_ime_allowed(true);
         }
-        let instance = Gpu::new_instance();
+        let instance = Gpu::new_instance_for_widgets();
         let surface = instance.create_surface(window.clone())?;
         let gpu = Gpu::from_instance_for_surface_with_power_preference(
             instance,
@@ -391,9 +448,33 @@ impl<D: Driver> WidgetApp<D> {
         let mut surface_config = surface
             .get_default_config(&gpu.adapter, px.width.max(1), px.height.max(1))
             .ok_or_else(|| anyhow::anyhow!("surface not supported by adapter"))?;
+        // Demand-rendered widgets rarely present; keep a single buffered frame
+        // of latency so DX12 does not retain multi-frame swapchain images.
+        surface_config.desired_maximum_frame_latency = 1;
         surface_config.present_mode = wgpu::PresentMode::AutoVsync;
         if self.config.transparent {
-            surface_config.alpha_mode = pick_alpha_mode(&surface, &gpu.adapter)?;
+            // Windows DX12 swapchains often only advertise Opaque. Prefer a
+            // real composite alpha when offered; otherwise degrade explicitly
+            // so ambient sticky hosts still boot, without pretending the
+            // surface stayed transparent.
+            match pick_alpha_mode(&surface, &gpu.adapter) {
+                Ok(mode) => {
+                    set_display_transparent(true);
+                    surface_config.alpha_mode = mode;
+                }
+                Err(error) => {
+                    // Explicit degrade: sticky hosts still boot, but callers can
+                    // observe the loss via display_transparent() == Some(false).
+                    set_display_transparent(false);
+                    log::warn!(
+                        "pocket-widget: transparent composite unavailable ({error}); \
+                         degrading to opaque (display_transparent=false)"
+                    );
+                    surface_config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
+                }
+            }
+        } else {
+            set_display_transparent(false);
         }
         surface.configure(&gpu.device, &surface_config);
 
@@ -458,14 +539,18 @@ impl<D: Driver> WidgetApp<D> {
 
         if self.config.ime {
             let area = self.driver.ime_cursor_area();
-            if let Some((x, y, w, h)) = area
-                && area != state.ime_area
-            {
+            if area != state.ime_area {
                 state.ime_area = area;
-                state.window.set_ime_cursor_area(
-                    winit::dpi::PhysicalPosition::new(x, y),
-                    winit::dpi::PhysicalSize::new(w, h),
-                );
+                match area {
+                    Some((x, y, w, h)) => state.window.set_ime_cursor_area(
+                        winit::dpi::PhysicalPosition::new(x, y),
+                        winit::dpi::PhysicalSize::new(w, h),
+                    ),
+                    None => state.window.set_ime_cursor_area(
+                        winit::dpi::PhysicalPosition::new(0.0, 0.0),
+                        winit::dpi::PhysicalSize::new(0.0, 0.0),
+                    ),
+                }
             }
         }
 
@@ -510,12 +595,8 @@ impl<D: Driver> WidgetApp<D> {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let size = (state.surface_config.width, state.surface_config.height);
-        self.driver.render(
-            &state.gpu,
-            &view,
-            size,
-            state.start.elapsed().as_secs_f32(),
-        )?;
+        self.driver
+            .render(&state.gpu, &view, size, state.start.elapsed().as_secs_f32())?;
         state.window.pre_present_notify();
         frame.present();
 
@@ -550,6 +631,9 @@ impl<D: Driver> ApplicationHandler for WidgetApp<D> {
         };
         state.input.on_window_event(&event);
         match event {
+            WindowEvent::Focused(false) => {
+                state.resizing = None;
+            }
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 log::debug!("pocket-widget: Resized {size:?}");
@@ -586,13 +670,19 @@ impl<D: Driver> ApplicationHandler for WidgetApp<D> {
                             state.resizing = Some((cursor, size));
                             // The grip press is a window gesture, not app
                             // input — take the button back.
-                            state.input.inject_mouse_button(MouseButton::Left, false);
+                            state.input.cancel_mouse_button(MouseButton::Left);
                         } else if self.driver.drag_at(cursor) {
-                            let _ = state.window.drag_window();
-                            // macOS swallows the release once the OS drag
-                            // session starts; clear the button so the next
-                            // press edges.
-                            state.input.inject_mouse_button(MouseButton::Left, false);
+                            match state.window.drag_window() {
+                                Ok(()) => {
+                                    // macOS swallows the release once the OS drag
+                                    // session starts; clear the button so the next
+                                    // press edges.
+                                    state.input.cancel_mouse_button(MouseButton::Left);
+                                }
+                                Err(error) => {
+                                    log::warn!("pocket-widget: window drag failed: {error}");
+                                }
+                            }
                         }
                     }
                 }
@@ -605,8 +695,20 @@ impl<D: Driver> ApplicationHandler for WidgetApp<D> {
                     let scale = state.window.scale_factor();
                     let min_w = (self.config.min_size.0 as f64 * scale) as i64;
                     let min_h = (self.config.min_size.1 as f64 * scale) as i64;
-                    let w = (size0.0 as i64 + (position.x - grab.x as f64) as i64).max(min_w);
-                    let h = (size0.1 as i64 + (position.y - grab.y as f64) as i64).max(min_h);
+                    let max_w = self
+                        .config
+                        .max_size
+                        .map(|(width, _)| (width as f64 * scale) as i64)
+                        .unwrap_or(i64::MAX);
+                    let max_h = self
+                        .config
+                        .max_size
+                        .map(|(_, height)| (height as f64 * scale) as i64)
+                        .unwrap_or(i64::MAX);
+                    let w =
+                        (size0.0 as i64 + (position.x - grab.x as f64) as i64).clamp(min_w, max_w);
+                    let h =
+                        (size0.1 as i64 + (position.y - grab.y as f64) as i64).clamp(min_h, max_h);
                     let _ = state
                         .window
                         .request_inner_size(winit::dpi::PhysicalSize::new(w as u32, h as u32));
@@ -630,5 +732,32 @@ impl<D: Driver> ApplicationHandler for WidgetApp<D> {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.pump(event_loop);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WidgetConfig, validate_config};
+
+    #[test]
+    fn rejects_reverse_resize_bounds() {
+        let config = WidgetConfig {
+            resizable: true,
+            min_size: (800, 600),
+            max_size: Some((640, 480)),
+            ..WidgetConfig::default()
+        };
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn accepts_valid_resize_bounds() {
+        let config = WidgetConfig {
+            resizable: true,
+            min_size: (320, 240),
+            max_size: Some((1280, 720)),
+            ..WidgetConfig::default()
+        };
+        assert!(validate_config(&config).is_ok());
     }
 }

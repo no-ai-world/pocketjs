@@ -19,7 +19,7 @@
 import { $ } from "bun";
 import { existsSync, statSync, unlinkSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   FRAMEWORKS,
   parseFramework,
@@ -33,7 +33,7 @@ import {
 import { verifyPlanHash, type ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
 import { resolvePspBuildToolchain } from "./psp-toolchain.ts";
 
-const pspUiDir = new URL("..", import.meta.url).pathname; // PocketJS/
+const pspUiDir = fileURLToPath(new URL("..", import.meta.url)); // PocketJS/
 const nativeDir = pspUiDir + "hosts/psp/";
 const pspTarget = nativeDir + "targets/mipsel-sony-psp.json";
 

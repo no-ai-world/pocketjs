@@ -21,8 +21,9 @@
 import { $ } from "bun";
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 
-const ROOT = new URL("../..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const headless = process.env.PPSSPP_HEADLESS || `${homedir()}/ppsspp-src/build/PPSSPPHeadless`;
 const dccap = `${homedir()}/.ppsspp/dc_cap`;
 const eboot = `${ROOT}hosts/psp/target/mipsel-sony-psp/debug/EBOOT.PBP`;
