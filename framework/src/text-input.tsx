@@ -39,6 +39,7 @@ import {
   type Measure,
   type SelEdit,
 } from "./text-edit.ts";
+import { ENUMS } from "../../contracts/spec/spec.ts";
 import { getOps } from "./host.ts";
 import type { NodeMirror } from "./native-tree.ts";
 
@@ -60,8 +61,6 @@ export interface TextInputProps {
   maxWidth?: number;
   class?: string;
   style?: ViewProps["style"];
-  /** 聚焦时外层 class。 */
-  focusClass?: string;
   caretClass?: string;
   selectionClass?: string;
   placeholderClass?: string;
@@ -89,8 +88,7 @@ export function TextInput(props: TextInputProps): SolidJSX.Element {
       disabled: false,
       lineHeight: DEFAULT_LINE_H,
       measure: defaultMeasure as Measure,
-      class: "relative flex-row items-center px-2 py-1 rounded-md bg-white border-slate-300",
-      focusClass: "border-indigo-500",
+      class: "relative flex-row items-center px-2 py-1 rounded-md bg-white border-slate-300 focus:border-indigo-500",
       caretClass: "bg-indigo-600",
       selectionClass: "bg-indigo-200",
       placeholderClass: "text-sm text-slate-400",
@@ -426,7 +424,7 @@ export function TextInput(props: TextInputProps): SolidJSX.Element {
       focusable={!p.disabled}
       focusKind="editable"
       debugName={p.debugName ?? "TextInput"}
-      class={[p.class, focused() ? p.focusClass : ""].filter(Boolean).join(" ")}
+      class={p.class}
       style={p.style}
       onPress={() => {
         if (p.disabled) return;
@@ -448,11 +446,17 @@ export function TextInput(props: TextInputProps): SolidJSX.Element {
           <>
             {selRects().map((r) => (
               <View
-                class={["absolute", p.selectionClass].join(" ")}
-                style={{ insetL: r.x, insetT: r.y, width: r.w, height: r.h }}
+                class={p.selectionClass}
+                style={{
+                  posType: ENUMS.PosType.Absolute,
+                  insetL: r.x,
+                  insetT: r.y,
+                  width: r.w,
+                  height: r.h,
+                }}
               />
             ))}
-            {lines().map((line, i) => {
+            {lines().map((line) => {
               const pe = preedit();
               const text = displayDoc().slice(line.start, line.end);
               // preedit 下划线：覆盖 preedit 区间的行片段用 preeditClass
@@ -468,19 +472,20 @@ export function TextInput(props: TextInputProps): SolidJSX.Element {
                 </Text>
               );
             })}
-            {focused() && blink() && !p.disabled ? (
-              <View
-                class={["absolute", p.caretClass].join(" ")}
-                style={{
-                  insetL: caretPx(),
-                  insetT: caretRow() * p.lineHeight + 2,
-                  width: CARET_W,
-                  height: p.lineHeight - 4,
-                }}
-              />
-            ) : null}
           </>
         )}
+        {focused() && blink() && !p.disabled ? (
+          <View
+            class={p.caretClass}
+            style={{
+              posType: ENUMS.PosType.Absolute,
+              insetL: caretPx(),
+              insetT: caretRow() * p.lineHeight + 2,
+              width: CARET_W,
+              height: p.lineHeight - 4,
+            }}
+          />
+        ) : null}
       </View>
     </View>
   );

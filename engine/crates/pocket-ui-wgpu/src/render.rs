@@ -473,8 +473,13 @@ impl UiRenderer {
                     let (x, y) = xy(words[i + 1]);
                     let (w, h) = wh(words[i + 2]);
                     let (from, to, dir) = (words[i + 3], words[i + 4], words[i + 5]);
+                    let hairline = dir == spec::DRAW_HAIRLINE_HORIZONTAL;
+                    let y = if hairline { y.round() } else { y };
+                    let h = if hairline { s.round().max(1.0) } else { h };
                     // Corner colors per spec GradDir (TL, TR, BR, BL).
-                    let colors = if dir == spec::GradDir::ToTop as u32 {
+                    let colors = if hairline {
+                        [from; 4]
+                    } else if dir == spec::GradDir::ToTop as u32 {
                         [to, to, from, from]
                     } else if dir == spec::GradDir::ToLeft as u32 {
                         [to, from, from, to]

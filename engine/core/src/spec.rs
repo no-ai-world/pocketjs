@@ -403,6 +403,8 @@ pub mod draw_op {
     pub const TRI: u32 = 7;
     pub const TEX_TRI: u32 = 8;
 }
+/// GRAD_RECT direction marker for a crisp horizontal border hairline.
+pub const DRAW_HAIRLINE_HORIZONTAL: u32 = 0xffffffff;
 
 /// .pak container constants (byte-compatible with dreamcart's format;
 /// copied from framework/bake/pak.ts + docs/pak-format.md).

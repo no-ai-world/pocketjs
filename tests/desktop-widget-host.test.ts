@@ -160,6 +160,27 @@ describe("desktop-widget host invariants", () => {
     expect(noteSvc).not.toMatch(/(?:ops\.)?svcPoll\(/);
   });
 
+  test("TextInput keeps focus and caret styles as build-time class literals", () => {
+    // Keep each runtime class lookup identical to one generated style-table key.
+    const src = readFileSync(join(root, "framework/src/text-input.tsx"), "utf8");
+    const placeholder = src.indexOf("{showPlaceholder() ?");
+    const placeholderClose = src.indexOf("        )}\n        {focused()", placeholder);
+    const caret = src.indexOf("{focused() && blink() && !p.disabled ?", placeholder);
+    expect(placeholder).toBeGreaterThanOrEqual(0);
+    expect(placeholderClose).toBeGreaterThan(placeholder);
+    expect(caret).toBeGreaterThan(placeholderClose);
+    expect(src).toContain('class={p.class}');
+    expect(src).toContain('class={p.caretClass}');
+    expect(src).toContain('class={p.selectionClass}');
+    expect(src).toContain("posType: ENUMS.PosType.Absolute");
+    expect(src).not.toContain("focusClass");
+    expect(src).not.toContain('.join(" ")');
+
+    const form = readFileSync(join(root, "apps/form/app.tsx"), "utf8");
+    expect(form).toContain("items-center h-[32]");
+    expect(form).toContain("focus:border-indigo-500");
+  });
+
   test("note launcher requests sticky chrome explicitly and rejects unknown OS defaults", () => {
     // bun run note 必须显式 --chrome note，且非 win/mac 不能默默选 macos
     const src = readFileSync(join(root, "tools/note.ts"), "utf8");

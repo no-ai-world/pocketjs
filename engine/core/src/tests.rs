@@ -243,7 +243,12 @@ fn validate_drawlist(words: &[u32]) -> [u32; 9] {
             }
             spec::draw_op::GRAD_RECT => {
                 rect_ok(words[i + 1], words[i + 2]);
-                assert!(words[i + 5] <= 3, "bad GradDir");
+                let direction = words[i + 5];
+                assert!(
+                    direction <= 3
+                        || (direction == spec::DRAW_HAIRLINE_HORIZONTAL && words[i + 3] == words[i + 4]),
+                    "bad GradDir"
+                );
                 i += 6;
             }
             spec::draw_op::GLYPH_RUN => {
@@ -921,7 +926,7 @@ fn transparent_rounded_border_draws_an_outline_not_square_strips() {
     let mut i = 0usize;
     while i < words.len() {
         match words[i] {
-            spec::draw_op::RECT => {
+            op @ (spec::draw_op::RECT | spec::draw_op::GRAD_RECT) => {
                 let (x, y) = decode_xy(words[i + 1]);
                 let (w, h) = decode_wh(words[i + 2]);
                 let c = words[i + 3];
@@ -932,9 +937,8 @@ fn transparent_rounded_border_draws_an_outline_not_square_strips() {
                     covers_outer_corner |= covers(10, 10);
                     covers_center |= covers(20, 16);
                 }
-                i += 4;
+                i += if op == spec::draw_op::RECT { 4 } else { 6 };
             }
-            spec::draw_op::GRAD_RECT => i += 6,
             spec::draw_op::TRI => i += 7,
             spec::draw_op::GLYPH_RUN => i += 3 + 2 * ((words[i + 1] >> 16) as usize),
             spec::draw_op::TEX_QUAD => i += 9,
@@ -952,6 +956,40 @@ fn transparent_rounded_border_draws_an_outline_not_square_strips() {
         !covers_center,
         "transparent border must not fill the center"
     );
+}
+
+#[test]
+fn opaque_rounded_border_emits_horizontal_hairline_markers() {
+    // Verify opaque rounded-border hairline markers.
+    let mut ui = Ui::new();
+    let n = ui.create_node(0);
+    ui.set_prop(n, spec::prop::WIDTH, 120.0);
+    ui.set_prop(n, spec::prop::HEIGHT, 32.0);
+    ui.set_prop(
+        n,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
+    ui.set_prop(n, spec::prop::INSET_T, 10.0);
+    ui.set_prop(n, spec::prop::INSET_L, 10.0);
+    ui.set_prop(n, spec::prop::RADIUS, 6.0);
+    ui.set_prop(n, spec::prop::BG_COLOR, abgr(255, 255, 255, 255) as f64);
+    ui.set_prop(n, spec::prop::BORDER_COLOR, abgr(99, 102, 241, 255) as f64);
+    ui.set_prop(n, spec::prop::BORDER_WIDTH, 1.0);
+    ui.insert_before(spec::ROOT_ID, n, 0);
+    ui.tick();
+
+    let markers = ui
+        .draw()
+        .words
+        .windows(6)
+        .filter(|op| {
+            op[0] == spec::draw_op::GRAD_RECT
+                && op[3] == op[4]
+                && op[5] == spec::DRAW_HAIRLINE_HORIZONTAL
+        })
+        .count();
+    assert_eq!(markers, 2, "one snapped hairline is emitted for each horizontal edge");
 }
 
 #[test]

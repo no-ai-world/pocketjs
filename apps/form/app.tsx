@@ -75,8 +75,7 @@ export default function Form() {
             onSubmit={submit}
             placeholder="Your name"
             maxWidth={280}
-            class="h-[32] px-2 rounded-md bg-white border-slate-300"
-            focusClass="border-indigo-500"
+            class="relative flex-row items-center h-[32] px-2 rounded-md bg-white border-slate-300 focus:border-indigo-500"
           />
         </Show>
       </View>
@@ -91,8 +90,7 @@ export default function Form() {
             placeholder="Multiline note…"
             maxWidth={280}
             lineHeight={20}
-            class="min-h-[72] px-2 py-1 rounded-md bg-white border-slate-300 items-start"
-            focusClass="border-indigo-500"
+            class="relative flex-row items-start min-h-[72] px-2 py-1 rounded-md bg-white border-slate-300 focus:border-indigo-500"
           />
         </Show>
       </View>

@@ -986,7 +986,6 @@ impl<'a> Walker<'a> {
         let bg_color = scale_alpha(r.bg_color, op);
         let border_color = scale_alpha(r.border_color, op);
         let rounded_border = r.radius > 0.0 && r.border_width > 0.0 && alpha(border_color) > 0;
-        let rounded_ring = rounded_border && (has_grad || alpha(bg_color) > 0);
 
         if r.shadow > 0 && (alpha(bg_color) > 0 || has_grad) {
             self.emit_shadow(dl, &world, l.w, l.h, r.radius, r.shadow, op, &clip);
@@ -998,29 +997,6 @@ impl<'a> Walker<'a> {
             // of filling the box (spec.ts PROP.arcStart/arcSweep/arcWidth).
             if alpha(bg_color) > 0 {
                 self.emit_arc(dl, &world, l.w, l.h, &r, bg_color, &clip);
-            }
-        } else if rounded_ring {
-            self.emit_rounded_box(dl, &world, 0.0, 0.0, l.w, l.h, r.radius, Fill::Flat(border_color), &clip);
-            let bw = r.border_width.min(l.w * 0.5).min(l.h * 0.5);
-            if has_grad {
-                let fill = Fill::Grad {
-                    from: scale_alpha(r.grad_from, op),
-                    to: scale_alpha(r.grad_to, op),
-                    dir: r.grad_dir,
-                };
-                self.emit_rounded_box(dl, &world, bw, bw, l.w - bw, l.h - bw, (r.radius - bw).max(0.0), fill, &clip);
-            } else {
-                self.emit_rounded_box(
-                    dl,
-                    &world,
-                    bw,
-                    bw,
-                    l.w - bw,
-                    l.h - bw,
-                    (r.radius - bw).max(0.0),
-                    Fill::Flat(bg_color),
-                    &clip,
-                );
             }
         } else if has_grad {
             let fill = Fill::Grad {
@@ -1035,7 +1011,7 @@ impl<'a> Walker<'a> {
 
         // -- border: 4 inset strips ------------------------------------------
         let bw = r.border_width;
-        if !rounded_ring && bw > 0.0 && alpha(border_color) > 0 {
+        if bw > 0.0 && alpha(border_color) > 0 {
             if rounded_border {
                 self.emit_rounded_border(dl, &world, 0.0, 0.0, l.w, l.h, r.radius, bw, Fill::Flat(border_color), &clip);
             } else {
@@ -1755,6 +1731,7 @@ impl<'a> Walker<'a> {
         clip_x0: i32,
         clip_x1: i32,
         y_coverage: u32,
+        horizontal_hairline: bool,
     ) {
         if y_coverage == 0 || span_x1 <= span_x0 {
             return;
@@ -1785,6 +1762,7 @@ impl<'a> Walker<'a> {
                 left_edge,
                 left_edge + 1,
                 coverage_mul(x_coverage, y_coverage),
+                horizontal_hairline,
             );
             emitted_left_edge = true;
         }
@@ -1801,6 +1779,7 @@ impl<'a> Walker<'a> {
             full_start.max(clip_x0),
             full_end.min(clip_x1),
             y_coverage,
+            horizontal_hairline,
         );
 
         if full_end < right_edge
@@ -1821,6 +1800,7 @@ impl<'a> Walker<'a> {
                 full_end,
                 full_end + 1,
                 coverage_mul(x_coverage, y_coverage),
+                horizontal_hairline,
             );
         }
     }
@@ -1839,6 +1819,7 @@ impl<'a> Walker<'a> {
         x0: i32,
         x1: i32,
         coverage: u32,
+        horizontal_hairline: bool,
     ) {
         if coverage == 0 || h <= 0 || x1 <= x0 {
             return;
@@ -1849,10 +1830,19 @@ impl<'a> Walker<'a> {
             let next = (x + max_run).min(x1);
             let color = fill_color_at(fill, sx0, sy0, sx1, sy1, x, py, next, coverage);
             if alpha(color) > 0 {
-                dl.words.push(spec::draw_op::RECT);
-                dl.words.push(xy_word(x as f32, py as f32));
-                dl.words.push(wh_word((next - x) as f32, h as f32));
-                dl.words.push(color);
+                if horizontal_hairline && h == 1 && next - x > 1 {
+                    dl.words.push(spec::draw_op::GRAD_RECT);
+                    dl.words.push(xy_word(x as f32, py as f32));
+                    dl.words.push(wh_word((next - x) as f32, h as f32));
+                    dl.words.push(color);
+                    dl.words.push(color);
+                    dl.words.push(spec::DRAW_HAIRLINE_HORIZONTAL);
+                } else {
+                    dl.words.push(spec::draw_op::RECT);
+                    dl.words.push(xy_word(x as f32, py as f32));
+                    dl.words.push(wh_word((next - x) as f32, h as f32));
+                    dl.words.push(color);
+                }
             }
             x = next;
         }
@@ -1950,6 +1940,7 @@ impl<'a> Walker<'a> {
                     ix0,
                     ix1,
                     y_coverage,
+                    false,
                 );
                 self.emit_fractional_span(
                     dl,
@@ -1965,6 +1956,7 @@ impl<'a> Walker<'a> {
                     ix0,
                     ix1,
                     y_coverage,
+                    false,
                 );
             } else {
                 self.emit_fractional_span(
@@ -1981,6 +1973,7 @@ impl<'a> Walker<'a> {
                     ix0,
                     ix1,
                     y_coverage,
+                    true,
                 );
             }
         }
@@ -2112,12 +2105,15 @@ impl<'a> Walker<'a> {
                         left_edge,
                         left_edge + 1,
                         x_coverage,
+                        false,
                     );
                     emitted_left_edge = true;
                 }
                 let inner_x0 = full_start.max(ix0);
                 let inner_x1 = full_end.min(ix1);
-                self.emit_rounded_span(dl, &fill, sx0, sy0, sx1, sy1, mid_y0, h, inner_x0, inner_x1, 255);
+                self.emit_rounded_span(
+                    dl, &fill, sx0, sy0, sx1, sy1, mid_y0, h, inner_x0, inner_x1, 255, false,
+                );
                 if full_end < right_edge
                     && full_end >= ix0
                     && full_end < ix1
@@ -2136,6 +2132,7 @@ impl<'a> Walker<'a> {
                         full_end,
                         full_end + 1,
                         x_coverage,
+                        false,
                     );
                 }
             }
@@ -2185,13 +2182,16 @@ impl<'a> Walker<'a> {
                     left_edge,
                     left_edge + 1,
                     coverage_mul(x_coverage, y_coverage),
+                    false,
                 );
                 emitted_left_edge = true;
             }
 
             let inner_x0 = full_start.max(ix0);
             let inner_x1 = full_end.min(ix1);
-            self.emit_rounded_span(dl, &fill, sx0, sy0, sx1, sy1, py, 1, inner_x0, inner_x1, y_coverage);
+            self.emit_rounded_span(
+                dl, &fill, sx0, sy0, sx1, sy1, py, 1, inner_x0, inner_x1, y_coverage, false,
+            );
 
             if full_end < right_edge && full_end >= ix0 && full_end < ix1 && !(emitted_left_edge && full_end == left_edge) {
                 let x_coverage = pixel_interval_coverage(full_end, span_x0, span_x1);
@@ -2207,6 +2207,7 @@ impl<'a> Walker<'a> {
                     full_end,
                     full_end + 1,
                     coverage_mul(x_coverage, y_coverage),
+                    false,
                 );
             }
         }

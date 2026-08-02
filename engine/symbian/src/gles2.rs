@@ -740,7 +740,14 @@ impl Renderer {
         }
     }
 
-    fn build(&mut self, words: &[u32], logical_width: u32, logical_height: u32) {
+    fn build(
+        &mut self,
+        words: &[u32],
+        logical_width: u32,
+        logical_height: u32,
+        physical_scale_y: f32,
+    ) {
+        // Decode DrawList commands.
         self.vertices.clear();
         self.commands.clear();
         let full = Clip {
@@ -786,7 +793,20 @@ impl Renderer {
                     let from = words[index + 3];
                     let to = words[index + 4];
                     let direction = words[index + 5];
-                    let colors = if direction == spec::GradDir::ToTop as u32 {
+                    let hairline = direction == spec::DRAW_HAIRLINE_HORIZONTAL;
+                    let y = if hairline {
+                        (y * physical_scale_y).round() / physical_scale_y
+                    } else {
+                        y
+                    };
+                    let height = if hairline {
+                        physical_scale_y.round().max(1.0) / physical_scale_y
+                    } else {
+                        height
+                    };
+                    let colors = if hairline {
+                        [from; 4]
+                    } else if direction == spec::GradDir::ToTop as u32 {
                         [to, to, from, from]
                     } else if direction == spec::GradDir::ToLeft as u32 {
                         [to, from, from, to]
@@ -1006,7 +1026,12 @@ impl Renderer {
         if !self.sync_resources(ui_ref) {
             return false;
         }
-        self.build(words, logical_width, logical_height);
+        self.build(
+            words,
+            logical_width,
+            logical_height,
+            target_height as f32 / logical_height as f32,
+        );
 
         glUseProgram(self.program);
         glUniform2f(
@@ -1310,7 +1335,7 @@ mod tests {
         ]);
 
         let mut renderer = planner(handle, texture);
-        renderer.build(&words, 200, 120);
+        renderer.build(&words, 200, 120, 1.0);
 
         assert_eq!(renderer.vertices.len(), 6);
         assert_eq!(
@@ -1382,6 +1407,7 @@ mod tests {
             ],
             100,
             50,
+            1.0,
         );
 
         assert_eq!(renderer.vertices.len(), 6);
@@ -1391,12 +1417,40 @@ mod tests {
     }
 
     #[test]
+    fn horizontal_hairline_snaps_to_physical_rows() {
+        // Verify physical hairline alignment.
+        let color = 0xfff1_6663;
+        let mut renderer = planner(0, 9);
+        renderer.build(
+            &[
+                spec::draw_op::GRAD_RECT,
+                pack_xy(10, 25),
+                pack_wh(80, 1),
+                color,
+                color,
+                spec::DRAW_HAIRLINE_HORIZONTAL,
+            ],
+            480,
+            360,
+            1.25,
+        );
+
+        assert_eq!(renderer.vertices.len(), 6);
+        assert!(renderer.vertices.iter().all(|vertex| vertex.color == color));
+        let top = renderer.vertices[0].position[1] * 1.25;
+        let bottom = renderer.vertices[2].position[1] * 1.25;
+        assert!((top - 31.0).abs() < 0.001);
+        assert!((bottom - 32.0).abs() < 0.001);
+    }
+
+    #[test]
     fn truncated_draw_op_stops_without_partial_geometry() {
         let mut renderer = planner(0, 9);
         renderer.build(
             &[spec::draw_op::TEX_TRI, 0, pack_xy(1, 2)],
             100,
             50,
+            1.0,
         );
         assert!(renderer.vertices.is_empty());
         assert!(renderer.commands.is_empty());

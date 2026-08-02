@@ -29,6 +29,7 @@ import {
   PAK_MAGIC,
   PAK_VERSION,
   DRAW_OP,
+  DRAW_HAIRLINE_HORIZONTAL,
   ENUMS,
   FIXED_DT,
   FONT_CMAP_ENTRY_SIZE,
@@ -362,6 +363,8 @@ export function generateRust(): string {
     put(`    pub const ${screaming(name)}: u32 = ${v};`);
   }
   put("}");
+  put(`/// GRAD_RECT direction marker for a crisp horizontal border hairline.`);
+  put(`pub const DRAW_HAIRLINE_HORIZONTAL: u32 = ${hex(DRAW_HAIRLINE_HORIZONTAL)};`);
   put("");
 
   // --- pak ----------------------------------------------------------------------

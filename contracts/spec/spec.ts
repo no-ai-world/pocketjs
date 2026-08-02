@@ -1221,7 +1221,8 @@ export const FONT_FLAG_BOLD = 1 << 0;
 //
 // Ops (header word = op code; total word counts include the header):
 //   RECT        (4 words):  op, xy, wh, color
-//   GRAD_RECT   (6 words):  op, xy, wh, colorFrom, colorTo, dir (GradDir u32)
+//   GRAD_RECT   (6 words):  op, xy, wh, colorFrom, colorTo, dir (GradDir u32;
+//                           DRAW_HAIRLINE_HORIZONTAL requires equal colors)
 //   GLYPH_RUN   (3 + 2n):   op,
 //                           word1: bits 0-7 fontSlot, bits 8-15 reserved(0),
 //                                  bits 16-31 glyph count n (u16),
@@ -1267,6 +1268,9 @@ export const DRAW_OP = {
   tri: 7,
   texTri: 8,
 } as const;
+
+/** GRAD_RECT direction marker for a crisp horizontal border hairline. */
+export const DRAW_HAIRLINE_HORIZONTAL = 0xffff_ffff;
 
 // ---------------------------------------------------------------------------
 // PAK container constants
