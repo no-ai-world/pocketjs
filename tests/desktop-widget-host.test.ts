@@ -173,6 +173,7 @@ describe("desktop-widget host invariants", () => {
     expect(src).toContain('class={p.caretClass}');
     expect(src).toContain('class={p.selectionClass}');
     expect(src).toContain("posType: ENUMS.PosType.Absolute");
+    expect(src.match(/style=\{\{ height: p\.lineHeight, lineHeight: p\.lineHeight \}\}/g)).toHaveLength(2);
     expect(src).not.toContain("focusClass");
     expect(src).not.toContain('.join(" ")');
 

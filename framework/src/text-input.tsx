@@ -441,7 +441,12 @@ export function TextInput(props: TextInputProps): SolidJSX.Element {
         style={maxW() === 10_000 ? undefined : { width: maxW() }}
       >
         {showPlaceholder() ? (
-          <Text class={p.placeholderClass}>{p.placeholder}</Text>
+          <Text
+            class={p.placeholderClass}
+            style={{ height: p.lineHeight, lineHeight: p.lineHeight }}
+          >
+            {p.placeholder}
+          </Text>
         ) : (
           <>
             {selRects().map((r) => (
@@ -466,7 +471,7 @@ export function TextInput(props: TextInputProps): SolidJSX.Element {
               return (
                 <Text
                   class={overlaps ? p.preeditClass : p.textClass}
-                  style={{ height: p.lineHeight }}
+                  style={{ height: p.lineHeight, lineHeight: p.lineHeight }}
                 >
                   {text.length === 0 ? " " : text}
                 </Text>

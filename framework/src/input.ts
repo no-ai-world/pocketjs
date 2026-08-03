@@ -901,12 +901,13 @@ function pointerContactFrame(buttons: number, pressed: number, released: number)
   const contact = pointer;
   const target = hitFocusable(contact.x, contact.y);
   const preservingPress = pointerPressTarget !== null && (buttons & BTN.CIRCLE) !== 0;
-  // Keep the original editable focused during a held native drag. The shell's
-  // mouse capture and TextInput's selection state are independent of hover.
-  if (!preservingPress && target !== focused) focusNode(target);
-  if (!preservingPress) pointerHoverFocus = target;
+  // Hover never focuses editable controls; click handling below owns that transition.
+  const hoverCanMoveFocus = target?.focusKind !== "editable";
+  if (!preservingPress && hoverCanMoveFocus && target !== focused) focusNode(target);
+  if (!preservingPress && hoverCanMoveFocus) pointerHoverFocus = target;
   if (pressed & BTN.CIRCLE && target) {
     pointerPressTarget = target;
+    if (target !== focused) focusNode(target);
   }
   if (released & BTN.CIRCLE) {
     const fire = pointerPressTarget !== null && target === pointerPressTarget;

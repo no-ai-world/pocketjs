@@ -394,9 +394,12 @@ function dispatchMouseEvent(
     return;
   }
 
-  if (hit && hit !== getFocused()) focusNode(hit);
-  else if (!hit) focusNode(null);
-  const handler = getEditableHandler(getFocused());
+  // Hover never focuses editable controls; click handling above owns that transition.
+  if (hit?.focusKind !== "editable") {
+    if (hit && hit !== getFocused()) focusNode(hit);
+    else if (!hit) focusNode(null);
+  }
+  const handler = hit === getFocused() ? getEditableHandler(hit) : null;
   if (handler) dispatchToEditable(ev, handler);
 }
 

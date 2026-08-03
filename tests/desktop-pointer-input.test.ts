@@ -126,6 +126,27 @@ describe("desktop pointer contact → onPress", () => {
     expect(presses).toBe(1);
   });
 
+  test("desktop hover does not focus editable controls before a click", () => {
+    const input = mk(5, root, { focusable: true, focusKind: "editable" });
+    const button = mk(6, root, { focusable: true, focusKind: "action" });
+    host.hitResult = input.id;
+
+    __setTouches([__packTouchDesktop(120, 80)]);
+    handleFrame(0);
+    expect(getFocused()).toBeNull();
+
+    handleFrame(BTN.CIRCLE);
+    expect(getFocused()).toBe(input);
+
+    host.hitResult = button.id;
+    handleFrame(0);
+    expect(getFocused()).toBe(button);
+
+    host.hitResult = 0;
+    handleFrame(0);
+    expect(getFocused()).toBeNull();
+  });
+
   test("without input.pointer, contacts do not drive onPress", () => {
     // 无 pointer capability 时触点不能走 pointerContactFrame
     __setFeatureOverridesForTest({ "input.pointer": false });

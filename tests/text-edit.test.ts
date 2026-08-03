@@ -422,14 +422,28 @@ describe("host-input shell/companion split", () => {
     registerEditable(node, null);
   });
 
-  test("mouse leave clears hover focus but preserves editable capture", () => {
+  test("mouse hover does not focus editable controls and preserves click capture", () => {
     mountMock([]);
     const root = { id: 1, type: 0, parent: null, children: [] } as NodeMirror;
-    const node = { id: 7, type: 0, parent: root, children: [] } as NodeMirror;
-    root.children.push(node);
+    const node = {
+      id: 7,
+      type: 0,
+      parent: root,
+      children: [],
+      focusKind: "editable" as const,
+    } as NodeMirror;
+    const action = {
+      id: 8,
+      type: 0,
+      parent: root,
+      children: [],
+      focusKind: "action" as const,
+    } as NodeMirror;
+    root.children.push(node, action);
     setInputRoot(root);
     setHitRoot(root);
     registerFocusable(node, true);
+    registerFocusable(action, true);
     const pointers: boolean[] = [];
     registerEditable(node, {
       active: () => getFocused() === node,
@@ -441,7 +455,7 @@ describe("host-input shell/companion split", () => {
     inbox.push(JSON.stringify({ t: "mouse", x: 10, y: 10, src: "shell" }));
     __advanceClock();
     runFrameHooks(0);
-    expect(getFocused()).toBe(node);
+    expect(getFocused()).toBeNull();
 
     hitId = 0;
     inbox.push(JSON.stringify({ t: "mouse_leave", src: "shell" }));
@@ -462,7 +476,20 @@ describe("host-input shell/companion split", () => {
     inbox.push(JSON.stringify({ t: "mouse", x: 500, y: 10, d: false, src: "shell" }));
     __advanceClock();
     runFrameHooks(0);
-    expect(pointers).toEqual([false, true, false]);
+    expect(pointers).toEqual([true, false]);
+
+    hitId = action.id;
+    inbox.push(JSON.stringify({ t: "mouse", x: 20, y: 10, d: false, src: "shell" }));
+    __advanceClock();
+    runFrameHooks(0);
+    expect(getFocused()).toBe(action);
+    expect(pointers).toEqual([true, false]);
+
+    hitId = 0;
+    inbox.push(JSON.stringify({ t: "mouse", x: 500, y: 10, d: false, src: "shell" }));
+    __advanceClock();
+    runFrameHooks(0);
+    expect(getFocused()).toBeNull();
     dispose();
     registerEditable(node, null);
   });
