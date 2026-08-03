@@ -146,9 +146,10 @@ export function TextInput(props: TextInputProps): SolidJSX.Element {
     if (record) {
       recordEdit(history, { doc: p.value, caret: caret(), anchor: anchor() }, kind);
     }
+    // Synchronize controlled value before caret state.
+    if (next.doc !== p.value) p.onChange?.(next.doc);
     setCaret(next.caret);
     setAnchor(next.anchor);
-    if (next.doc !== p.value) p.onChange?.(next.doc);
     setBlink(true);
   };
 
