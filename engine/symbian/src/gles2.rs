@@ -844,8 +844,11 @@ impl Renderer {
                     let color = words[index + 2];
                     for glyph in 0..count {
                         let body = index + 3 + glyph * 2;
+                        let glyph_word = words[body + 1];
                         let (x, y) = xy(words[body]);
-                        let glyph_id = (words[body + 1] & 0xffff) as u16;
+                        let x = x + ((glyph_word >> 16) as u8 as i8) as f32 / 128.0;
+                        let y = y + ((glyph_word >> 24) as u8 as i8) as f32 / 128.0;
+                        let glyph_id = (glyph_word & 0xffff) as u16;
                         if glyph_id >= font.glyph_count {
                             continue;
                         }

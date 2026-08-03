@@ -602,8 +602,11 @@ pub unsafe fn render_over(ui: &Ui, words: &[u32]) {
                 if let Some(&font) = fonts().get(&slot) {
                     let color = words[i + 2];
                     for k in 0..count {
+                        let glyph_word = words[i + 4 + k * 2];
                         let (x, y) = xy(words[i + 3 + k * 2]);
-                        let gid = words[i + 4 + k * 2] & 0xffff;
+                        let x = x + ((glyph_word >> 16) as u8 as i8) as f32 * SCALE / 128.0;
+                        let y = y + ((glyph_word >> 24) as u8 as i8) as f32 * SCALE / 128.0;
+                        let gid = glyph_word & 0xffff;
                         if gid >= font.glyph_count as u32 {
                             continue;
                         }

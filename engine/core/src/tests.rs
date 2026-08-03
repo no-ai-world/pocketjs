@@ -1245,6 +1245,73 @@ fn glyph_runs_render_with_alignment_and_color() {
 }
 
 #[test]
+fn glyph_runs_preserve_half_pixel_anchor_residuals() {
+    // Preserve the odd-metric glyph anchor before backend scaling.
+    let mut ui = Ui::new();
+    ui.load_font_atlas(&encode_atlas(
+        0,
+        8,
+        18,
+        14,
+        17,
+        2,
+        &[(0xfffd, 0, 8), ('A' as u32, 1, 6)],
+    ));
+    let text = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_text(text, "A");
+    ui.insert_before(spec::ROOT_ID, text, 0);
+    ui.tick();
+
+    let words = ui.draw().words.clone();
+    let i = words
+        .iter()
+        .position(|&word| word == spec::draw_op::GLYPH_RUN)
+        .unwrap();
+    assert_eq!(decode_xy(words[i + 3]), (0, 0));
+    assert_eq!(words[i + 4] & 0xffff, 1);
+    assert_eq!((words[i + 4] >> 24) as u8 as i8, -64);
+}
+
+#[test]
+fn glyph_runs_keep_residual_overlap_at_scissor_edges() {
+    // Emit glyph cells whose subpixel anchor enters an overflow clip.
+    let mut ui = Ui::new();
+    ui.load_font_atlas(&encode_atlas(
+        0,
+        8,
+        18,
+        14,
+        17,
+        2,
+        &[(0xfffd, 0, 8), ('A' as u32, 1, 6)],
+    ));
+    let clip = ui.create_node(spec::NodeType::View as u8);
+    ui.set_prop(clip, spec::prop::WIDTH, 4.0);
+    ui.set_prop(clip, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(clip, spec::prop::OVERFLOW, spec::Overflow::Hidden as u8 as f64);
+    let text = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(text, spec::prop::TRANSLATE_X, 3.5);
+    ui.set_prop(text, spec::prop::WIDTH, 13.0);
+    ui.set_prop(
+        text,
+        spec::prop::TEXT_ALIGN,
+        spec::TextAlign::Center as u8 as f64,
+    );
+    ui.set_text(text, "A");
+    ui.insert_before(clip, text, 0);
+    ui.insert_before(spec::ROOT_ID, clip, 0);
+    ui.tick();
+
+    let words = ui.draw().words.clone();
+    let i = words
+        .iter()
+        .position(|&word| word == spec::draw_op::GLYPH_RUN)
+        .expect("the glyph overlaps the right clip edge by half a pixel");
+    assert_eq!(decode_xy(words[i + 3]).0, 4);
+    assert_eq!((words[i + 4] >> 16) as u8 as i8, -64);
+}
+
+#[test]
 fn explicit_animate_lifecycle() {
     let mut ui = Ui::new();
     let n = ui.create_node(0);

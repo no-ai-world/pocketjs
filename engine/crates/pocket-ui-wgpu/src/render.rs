@@ -44,6 +44,16 @@ fn image_cache_hit(cached: Option<ImageVersion>, current: ImageVersion) -> bool 
     cached == Some(current)
 }
 
+#[inline]
+fn glyph_position(xy_word: u32, glyph_word: u32, scale: f32) -> (f32, f32) {
+    // Scale one glyph anchor including its Q7 residual.
+    let x =
+        (xy_word & 0xffff) as u16 as i16 as f32 + ((glyph_word >> 16) as u8 as i8) as f32 / 128.0;
+    let y =
+        (xy_word >> 16) as u16 as i16 as f32 + ((glyph_word >> 24) as u8 as i8) as f32 / 128.0;
+    (x * scale, y * scale)
+}
+
 /// One live image texture, cached by core SLOT.
 struct ImageBind {
     version: ImageVersion,
@@ -521,7 +531,7 @@ impl UiRenderer {
                         let (cw, ch) = (font.cell_w as f32, font.cell_h as f32);
                         let (dw, dh) = (font.logical_w * s, font.logical_h * s);
                         for pair in words[i + 3..i + 3 + 2 * n].as_chunks::<2>().0 {
-                            let (gx, gy) = xy(pair[0]);
+                            let (gx, gy) = glyph_position(pair[0], pair[1], s);
                             let gid = (pair[1] & 0xffff) as u16;
                             if gid >= font.glyph_count {
                                 continue;
@@ -845,7 +855,15 @@ impl UiRenderer {
 
 #[cfg(test)]
 mod tests {
-    use super::{image_cache_hit, ImageVersion};
+    use super::{glyph_position, image_cache_hit, ImageVersion};
+
+    #[test]
+    fn glyph_position_preserves_a_half_logical_pixel_at_fractional_dpi() {
+        // Scale a half-pixel glyph residual at Windows DPI.
+        let xy = 10u32 | (10u32 << 16);
+        let glyph = 1u32 | (u32::from((-64i8) as u8) << 24);
+        assert_eq!(glyph_position(xy, glyph, 1.25), (12.5, 11.875));
+    }
 
     #[test]
     fn image_cache_decision_reuploads_in_place_content_revision() {

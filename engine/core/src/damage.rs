@@ -530,15 +530,27 @@ fn glyph_run_bounds(ui: &Ui, words: &[u32], clip: DamageRect) -> DamageRect {
         if gid >= atlas.glyph_count {
             continue;
         }
-        let (x, y) = xy(glyph[0]);
-        bounds = bounds.union(DamageRect::new(
-            x,
-            y,
-            x + atlas.cell_w as i32,
-            y + atlas.cell_h as i32,
+        bounds = bounds.union(glyph_bounds(
+            glyph[0],
+            glyph[1],
+            atlas.cell_w as i32,
+            atlas.cell_h as i32,
         ));
     }
     bounds.intersect(clip)
+}
+
+fn glyph_bounds(xy_word: u32, glyph_word: u32, cell_w: i32, cell_h: i32) -> DamageRect {
+    // Cover one glyph cell including its subpixel anchor residual.
+    let (x, y) = xy(xy_word);
+    let x_residual = (glyph_word >> 16) as u8 as i8;
+    let y_residual = (glyph_word >> 24) as u8 as i8;
+    DamageRect::new(
+        x - if x_residual < 0 { 1 } else { 0 },
+        y - if y_residual < 0 { 1 } else { 0 },
+        x + cell_w + if x_residual > 0 { 1 } else { 0 },
+        y + cell_h + if y_residual > 0 { 1 } else { 0 },
+    )
 }
 
 fn triangle_bounds(vertices: [u32; 3], clip: DamageRect) -> DamageRect {
@@ -603,6 +615,21 @@ mod tests {
             wh_word(4, 4),
             right,
         ]
+    }
+
+    #[test]
+    fn glyph_residuals_expand_damage_bounds_conservatively() {
+        // Cover residual-shifted glyph cells.
+        let negative_y = (u32::from((-64i8) as u8)) << 24;
+        assert_eq!(
+            glyph_bounds(xy_word(10, 20), negative_y, 14, 18),
+            DamageRect::new(10, 19, 24, 38),
+        );
+        let positive_x = (u32::from(1u8)) << 16;
+        assert_eq!(
+            glyph_bounds(xy_word(10, 20), positive_x, 14, 18),
+            DamageRect::new(10, 20, 25, 38),
+        );
     }
 
     #[test]

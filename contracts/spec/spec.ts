@@ -1214,10 +1214,12 @@ export const FONT_FLAG_BOLD = 1 << 0;
 //   f32s are stored as their IEEE-754 bits in one word.
 //   colors are u32 ABGR.
 //
-// GUARANTEE (the core's CPU clip stage): every coordinate a backend receives
-// is already clipped to [0, SCREEN_W] x [0, SCREEN_H] — always i16-safe, never
-// negative, never off-screen. Backends do NO clipping (the PSP GE would wrap
-// i16 coords otherwise).
+// GUARANTEE (the core's CPU clip stage): every integer coordinate a backend
+// receives is already clipped to [0, SCREEN_W] x [0, SCREEN_H] — always
+// i16-safe, never negative, never off-screen. A GLYPH_RUN Q7 residual may move
+// a subpixel-capable backend's quad by less than one logical pixel; those
+// backends retain their normal viewport/scissor clipping. Integer backends use
+// the clipped xy fallback (the PSP GE would wrap i16 coords otherwise).
 //
 // Ops (header word = op code; total word counts include the header):
 //   RECT        (4 words):  op, xy, wh, color
@@ -1227,8 +1229,13 @@ export const FONT_FLAG_BOLD = 1 << 0;
 //                           word1: bits 0-7 fontSlot, bits 8-15 reserved(0),
 //                                  bits 16-31 glyph count n (u16),
 //                           word2: color,
-//                           then n x { xy (glyph cell top-left),
-//                                      word: bits 0-15 gid, bits 16-31 reserved(0) }
+//                           then n x { xy (rounded glyph cell top-left),
+//                                      word: bits 0-15 gid,
+//                                            bits 16-23 x residual as i8 Q7,
+//                                            bits 24-31 y residual as i8 Q7 }
+//                           A glyph anchor is xy + residual / 128 logical px.
+//                           Integer backends may ignore the residual and retain
+//                           the rounded xy fallback.
 //   TEX_QUAD    (9 words):  op, texHandle, xy, wh, u0, v0, u1, v1 (f32 bits,
 //                           normalized 0..1), color (modulate; 0xFFFFFFFF = none)
 //   SCISSOR     (3 words):  op, xy, wh — push clip rect. The core emits rects

@@ -269,6 +269,21 @@ fn xy_word(x: f32, y: f32) -> u32 {
 }
 
 #[inline]
+fn glyph_residual_q7(offset: f32) -> u8 {
+    // Quantize one glyph-anchor residual.
+    let quantized = roundf(offset * 128.0) as i32;
+    quantized.clamp(-64, 63) as i8 as u8
+}
+
+#[inline]
+fn glyph_word(gid: u16, x_residual: f32, y_residual: f32) -> u32 {
+    // Pack one glyph id with its subpixel anchor residual.
+    gid as u32
+        | (glyph_residual_q7(x_residual) as u32) << 16
+        | (glyph_residual_q7(y_residual) as u32) << 24
+}
+
+#[inline]
 fn wh_word(w: f32, h: f32) -> u32 {
     let wi = roundf(w) as i32 as u16 as u32;
     let hi = roundf(h) as i32 as u16 as u32;
@@ -2355,14 +2370,14 @@ impl<'a> Walker<'a> {
             if rx < 0.0 || ry < 0.0 || rx > self.screen.0 || ry > self.screen.1 {
                 continue;
             }
-            if rx + cell_w <= clip.x0 || rx >= clip.x1 || ry + cell_h <= clip.y0 || ry >= clip.y1 {
+            if sx + cell_w <= clip.x0 || sx >= clip.x1 || sy + cell_h <= clip.y0 || sy >= clip.y1 {
                 continue;
             }
             if n == u16::MAX as u32 {
                 break;
             }
             dl.words.push(xy_word(rx, ry));
-            dl.words.push(g.gid as u32);
+            dl.words.push(glyph_word(g.gid, sx - rx, sy - ry));
             n += 1;
         }
         if n == 0 {
