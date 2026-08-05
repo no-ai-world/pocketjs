@@ -25,9 +25,11 @@ import {
   type VaporRenderRoot,
   type NodeMirror,
 } from "./renderer-vue-vapor.ts";
+import { clearTextSelection, reconcileTextSelection } from "./text-selection.ts";
+import { resetHostInputBuffer, runHostInputPump } from "./host-input.ts";
 import { setOverlayRoot } from "./overlay.ts";
 import { registerStyles, resolveStyle } from "./styles.ts";
-import { handleFrame, setInputRoot } from "./input.ts";
+import { handleFrame, setHitRoot, setInputRoot } from "./input.ts";
 import { __setAnalog, resetFrameHooks, runFrameHooks } from "./frame-vue-vapor.ts";
 import { __resetTouches, __setTouches } from "./touch.ts";
 import { __advanceClock, resetClock } from "./clock.ts";
@@ -196,6 +198,9 @@ export function render(code: VaporRenderRoot, opts: RenderOptions = {}): () => v
   overlayLayer = overlayRoot;
 
   setInputRoot(appRoot);
+  setHitRoot(rootMirror);
+  resetHostInputBuffer();
+  clearTextSelection();
   resetFrameHooks();
   resetClock(); // clock policy + effect shell (docs/DETERMINISM.md), same as Solid
   resetEffects();
@@ -206,7 +211,9 @@ export function render(code: VaporRenderRoot, opts: RenderOptions = {}): () => v
       __setAnalog(analog);
       __setTouches(touches);
       __drainEffects();
+      runHostInputPump();
       runFrameHooks(buttons);
+      reconcileTextSelection();
       handleFrame(buttons);
       runSweep();
     }),
@@ -217,8 +224,10 @@ export function render(code: VaporRenderRoot, opts: RenderOptions = {}): () => v
   return () => {
     removeResizeViewportHook();
     __resetTouches();
+    clearTextSelection();
     dispose();
     setInputRoot(null);
+    setHitRoot(null);
     setOverlayRoot(null);
     appLayer = null;
     overlayLayer = null;

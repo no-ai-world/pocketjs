@@ -13,6 +13,8 @@ import { animate, type EasingName } from "./animation.ts";
 import { pushButtonHandlerBlock, onButtonPress, onFrame, type ButtonPressOptions } from "./frame-vue-vapor.ts";
 import { BTN } from "./input-api.ts";
 import { pushFocusGrid, pushFocusScope, type FocusGridOptions, type FocusScopeOptions } from "./input.ts";
+import { registerSelectable } from "./host-input.ts";
+import { createTextSelectionHandler } from "./text-selection.ts";
 import { getOverlayRoot } from "./overlay.ts";
 import {
   createCommentNode,
@@ -247,6 +249,13 @@ function createPrimitiveNode(
   opts: { omit?: string[]; onNode?: (node: NodeMirror) => void; extra?: HostProps | (() => HostProps) } = {},
 ): NodeMirror {
   const node = createElement(tag);
+  if (tag === "text") {
+    registerSelectable(node, createTextSelectionHandler(node));
+    onScopeDispose(() => {
+      // 释放文字节点的选择注册。
+      registerSelectable(node, null);
+    });
+  }
   opts.onNode?.(node);
   mountChildren(node, slots);
   const omit = new Set(["children", "key", "ref", "nodeRef", "node-ref", ...(opts.omit ?? [])]);

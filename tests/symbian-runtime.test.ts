@@ -548,6 +548,44 @@ describe("experimental Nokia E7 runtime profile", () => {
       'addHostOperation(context, ui, "loadTileTexture", 2, HostLoadTileTexture)',
     );
     expect(coreHeader).toContain("int32_t ui_upload_tileset_tile(");
+    for (const declaration of [
+      "int32_t ui_node_local_point(",
+      "float ui_node_local_x(void);",
+      "float ui_node_local_y(void);",
+      "int32_t ui_node_text_layout(",
+      "float ui_node_text_width(void);",
+      "float ui_node_text_font_slot(void);",
+      "float ui_node_text_align(void);",
+      "float ui_node_text_tracking(void);",
+      "float ui_node_text_line_height(void);",
+      "int32_t ui_node_screen_rect(",
+      "int32_t ui_node_text_selection_rect(",
+      "float ui_node_screen_rect_x(void);",
+      "float ui_node_screen_rect_y(void);",
+      "float ui_node_screen_rect_w(void);",
+      "float ui_node_screen_rect_h(void);",
+    ]) {
+      expect(coreHeader).toContain(declaration);
+    }
+    for (const binding of [
+      'addHostOperation(context, ui, "nodeLocalPoint", 3, HostNodeLocalPoint)',
+      'addHostOperation(context, ui, "nodeLocalX", 0, HostNodeLocalX)',
+      'addHostOperation(context, ui, "nodeLocalY", 0, HostNodeLocalY)',
+      'addHostOperation(context, ui, "nodeTextLayout", 1, HostNodeTextLayout)',
+      'addHostOperation(context, ui, "nodeTextWidth", 0, HostNodeTextWidth)',
+      'addHostOperation(context, ui, "nodeTextFontSlot", 0, HostNodeTextFontSlot)',
+      'addHostOperation(context, ui, "nodeTextAlign", 0, HostNodeTextAlign)',
+      'addHostOperation(context, ui, "nodeTextTracking", 0, HostNodeTextTracking)',
+      'addHostOperation(context, ui, "nodeTextLineHeight", 0, HostNodeTextLineHeight)',
+      'addHostOperation(context, ui, "nodeScreenRect", 5, HostNodeScreenRect)',
+      'addHostOperation(context, ui, "nodeTextSelectionRect", 5, HostNodeTextSelectionRect)',
+      'addHostOperation(context, ui, "nodeScreenRectX", 0, HostNodeScreenRectX)',
+      'addHostOperation(context, ui, "nodeScreenRectY", 0, HostNodeScreenRectY)',
+      'addHostOperation(context, ui, "nodeScreenRectW", 0, HostNodeScreenRectW)',
+      'addHostOperation(context, ui, "nodeScreenRectH", 0, HostNodeScreenRectH)',
+    ]) {
+      expect(runtime).toContain(binding);
+    }
 
     expect(project).toContain("QT += core gui opengl");
     expect(project).not.toContain("DEFINES += POCKETJS_PERF_TRACE");

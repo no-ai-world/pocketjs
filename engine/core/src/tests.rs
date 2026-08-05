@@ -1142,6 +1142,330 @@ fn text_measurement_against_synthetic_atlas() {
 }
 
 #[test]
+fn native_text_layout_and_screen_rect_stage_resolved_values() {
+    let mut ui = Ui::new();
+    let atlas = encode_atlas(
+        2,
+        8,
+        8,
+        7,
+        10,
+        3,
+        &[(0xfffd, 0, 8), ('A' as u32, 1, 6), ('B' as u32, 2, 5)],
+    );
+    assert!(ui.load_font_atlas(&atlas));
+    let mut style = StyleSpec::new();
+    style.base = alloc::vec![
+        (spec::prop::WIDTH, 100f32.to_bits()),
+        (spec::prop::HEIGHT, 20f32.to_bits()),
+        (spec::prop::FONT_SLOT, 2),
+        (spec::prop::TEXT_ALIGN, spec::TextAlign::Center as u32),
+        (spec::prop::TRACKING, 1f32.to_bits()),
+        (spec::prop::LINE_HEIGHT, 12f32.to_bits()),
+    ];
+    assert!(ui.load_styles(&encode_styles(&[style])));
+    let text = ui.create_node(spec::NodeType::Text as u8);
+    ui.insert_before(spec::ROOT_ID, text, 0);
+    ui.set_style(text, 0);
+    ui.set_prop(text, spec::prop::TRANSLATE_X, 3.5);
+    ui.set_prop(text, spec::prop::TRANSLATE_Y, 2.0);
+    ui.set_text(text, "AB");
+    ui.tick();
+
+    assert_eq!(ui.node_text_layout(text), 1);
+    assert_eq!(ui.node_text_width(), 100.0);
+    assert_eq!(ui.node_text_font_slot(), 2.0);
+    assert_eq!(ui.node_text_align(), spec::TextAlign::Center as u8 as f32);
+    assert_eq!(ui.node_text_tracking(), 1.0);
+    assert_eq!(ui.node_text_line_height(), 12.0);
+
+    assert!(ui.node_screen_rect(text, 0.0, 0.0, 10.0, 12.0).is_some());
+    assert!((ui.node_screen_rect_x() - 3.5).abs() < 0.001);
+    assert!((ui.node_screen_rect_y() - 2.0).abs() < 0.001);
+    assert_eq!(ui.node_screen_rect_w(), 10.0);
+    assert_eq!(ui.node_screen_rect_h(), 12.0);
+
+    ui.set_prop(text, spec::prop::SCALE_X, 2.0);
+    ui.tick();
+    assert!(ui.node_screen_rect(text, 43.5, 0.0, 6.0, 12.0).is_some());
+    assert_eq!(ui.node_screen_rect_w(), 12.0);
+    assert!(ui
+        .node_text_selection_rect(text, 43.5, 0.0, 6.0, 12.0)
+        .is_some());
+    assert_eq!(ui.node_screen_rect_w(), 8.0);
+}
+
+#[test]
+fn native_text_selection_rect_respects_inherited_overflow_clip() {
+    let mut ui = Ui::new();
+    assert!(ui.load_font_atlas(&encode_atlas(
+        0,
+        8,
+        8,
+        7,
+        10,
+        3,
+        &[(0xfffd, 0, 8), ('A' as u32, 1, 6), ('B' as u32, 2, 5)],
+    )));
+    let clip = ui.create_node(spec::NodeType::View as u8);
+    ui.set_prop(clip, spec::prop::WIDTH, 10.0);
+    ui.set_prop(clip, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(
+        clip,
+        spec::prop::OVERFLOW,
+        spec::Overflow::Hidden as u8 as f64,
+    );
+    let text = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(text, spec::prop::WIDTH, 20.0);
+    ui.set_prop(text, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(text, spec::prop::SHRINK, 0.0);
+    ui.set_text(text, "AB");
+    ui.insert_before(clip, text, 0);
+    ui.insert_before(spec::ROOT_ID, clip, 0);
+    ui.tick();
+
+    let rect = ui
+        .node_text_selection_rect(text, 0.0, 0.0, 20.0, 20.0)
+        .expect("the first glyph remains visible inside the clip");
+    assert_eq!(rect.0, 0.0);
+    assert!(rect.1 >= 0.0);
+    assert_eq!(rect.2, 10.0);
+    assert_eq!(rect.3, 8.0);
+
+    ui.set_prop(text, spec::prop::TRANSLATE_X, -3.0);
+    ui.tick();
+    assert!(ui
+        .node_text_selection_rect(text, 0.0, 0.0, 6.0, 8.0)
+        .is_none());
+
+    ui.set_prop(clip, spec::prop::OPACITY, 0.0);
+    ui.tick();
+    assert!(ui
+        .node_text_selection_rect(text, 0.0, 0.0, 20.0, 20.0)
+        .is_none());
+    ui.set_prop(clip, spec::prop::OPACITY, 1.0);
+    ui.set_prop(text, spec::prop::OPACITY, 0.0);
+    ui.tick();
+    assert!(ui
+        .node_text_selection_rect(text, 0.0, 0.0, 20.0, 20.0)
+        .is_none());
+    ui.set_prop(text, spec::prop::OPACITY, 1.0);
+    ui.set_prop(text, spec::prop::TEXT_COLOR, abgr(255, 255, 255, 0) as f64);
+    ui.tick();
+    assert!(ui
+        .node_text_selection_rect(text, 0.0, 0.0, 20.0, 20.0)
+        .is_none());
+}
+
+#[test]
+fn native_text_selection_rect_supports_perspective_text() {
+    let mut ui = Ui::new();
+    assert!(ui.load_font_atlas(&encode_atlas(
+        0,
+        8,
+        8,
+        7,
+        10,
+        3,
+        &[(0xfffd, 0, 8), ('A' as u32, 1, 6), ('B' as u32, 2, 5)],
+    )));
+
+    let stage = ui.create_node(spec::NodeType::View as u8);
+    ui.set_prop(stage, spec::prop::POS_TYPE, spec::PosType::Absolute as u8 as f64);
+    ui.set_prop(stage, spec::prop::INSET_L, 20.0);
+    ui.set_prop(stage, spec::prop::INSET_T, 20.0);
+    ui.set_prop(stage, spec::prop::WIDTH, 100.0);
+    ui.set_prop(stage, spec::prop::HEIGHT, 100.0);
+    ui.set_prop(stage, spec::prop::PERSPECTIVE, 200.0);
+    ui.insert_before(spec::ROOT_ID, stage, 0);
+
+    let projected = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(projected, spec::prop::POS_TYPE, spec::PosType::Absolute as u8 as f64);
+    ui.set_prop(projected, spec::prop::INSET_L, 20.0);
+    ui.set_prop(projected, spec::prop::INSET_T, 20.0);
+    ui.set_prop(projected, spec::prop::WIDTH, 40.0);
+    ui.set_prop(projected, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(projected, spec::prop::SHRINK, 0.0);
+    ui.set_prop(projected, spec::prop::FONT_SLOT, 0.0);
+    ui.set_prop(projected, spec::prop::ROTATE_Y, 30.0);
+    ui.set_text(projected, "AB");
+    ui.insert_before(stage, projected, 0);
+
+    let direct = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(direct, spec::prop::POS_TYPE, spec::PosType::Absolute as u8 as f64);
+    ui.set_prop(direct, spec::prop::INSET_L, 140.0);
+    ui.set_prop(direct, spec::prop::INSET_T, 20.0);
+    ui.set_prop(direct, spec::prop::WIDTH, 40.0);
+    ui.set_prop(direct, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(direct, spec::prop::SHRINK, 0.0);
+    ui.set_prop(direct, spec::prop::FONT_SLOT, 0.0);
+    ui.set_prop(direct, spec::prop::PERSPECTIVE, 200.0);
+    ui.set_text(direct, "AB");
+    ui.insert_before(spec::ROOT_ID, direct, 0);
+
+    ui.tick();
+    assert!(ui
+        .node_text_selection_rect(projected, 0.0, 0.0, 40.0, 20.0)
+        .is_some());
+    assert!(ui
+        .node_text_selection_rect(direct, 0.0, 0.0, 40.0, 20.0)
+        .is_some());
+
+    let inline_parent = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(inline_parent, spec::prop::WIDTH, 40.0);
+    ui.set_prop(inline_parent, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(inline_parent, spec::prop::SHRINK, 0.0);
+    ui.set_prop(inline_parent, spec::prop::FONT_SLOT, 0.0);
+    ui.set_text(inline_parent, "A");
+    let inline_child = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_text(inline_child, "B");
+    ui.insert_before(inline_parent, inline_child, 0);
+    ui.insert_before(spec::ROOT_ID, inline_parent, 0);
+    ui.tick();
+    assert!(ui
+        .node_text_selection_rect(inline_parent, 0.0, 0.0, 40.0, 20.0)
+        .is_some());
+    assert!(ui
+        .node_text_selection_rect(inline_child, 0.0, 0.0, 40.0, 20.0)
+        .is_none());
+}
+
+#[test]
+fn text_selection_matches_the_glyph_run_count_limit() {
+    let mut ui = Ui::new();
+    assert!(ui.load_font_atlas(&encode_atlas(
+        0,
+        8,
+        8,
+        7,
+        10,
+        3,
+        &[(0xfffd, 0, 8), ('A' as u32, 1, 0), ('B' as u32, 2, 6)],
+    )));
+    let text = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(text, spec::prop::WIDTH, 8.0);
+    ui.set_prop(text, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(text, spec::prop::SHRINK, 0.0);
+    ui.set_prop(text, spec::prop::FONT_SLOT, 0.0);
+    let mut value = "A".repeat(u16::MAX as usize);
+    value.push('\n');
+    value.push('B');
+    ui.set_text(text, &value);
+    ui.insert_before(spec::ROOT_ID, text, 0);
+    ui.tick();
+
+    assert!(ui
+        .node_text_selection_rect(text, 0.0, 0.0, 8.0, 8.0)
+        .is_some());
+    let second_line = ui.node_text_selection_rect(text, 0.0, 10.0, 8.0, 8.0);
+    assert!(second_line.is_none(), "unexpected second-line rect: {:?}", second_line);
+}
+
+#[test]
+fn hit_text_glyph_uses_the_painted_q7_anchor() {
+    let mut ui = Ui::new();
+    assert!(ui.load_font_atlas(&encode_atlas(
+        0,
+        8,
+        8,
+        7,
+        10,
+        2,
+        &[(0xfffd, 0, 8), ('A' as u32, 1, 6)],
+    )));
+    let text = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(text, spec::prop::WIDTH, 8.0);
+    ui.set_prop(text, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(text, spec::prop::SHRINK, 0.0);
+    ui.set_prop(text, spec::prop::FONT_SLOT, 0.0);
+    // Fractional world position: the anchor rounds to (4, 2) but the Q7
+    // residual shifts the painted cell to [3.5, 11.5) x [2, 10).
+    ui.set_prop(text, spec::prop::TRANSLATE_X, 3.5);
+    ui.set_prop(text, spec::prop::TRANSLATE_Y, 2.0);
+    ui.set_text(text, "A");
+    ui.insert_before(spec::ROOT_ID, text, 0);
+    ui.tick();
+
+    // The unpainted strip [3.5, 4) still claims (it is covered by ink).
+    assert_eq!(ui.hit_test(3.7, 5.0), text);
+    // The strip [11.5, 12) beyond the painted cell must not claim.
+    assert_eq!(ui.hit_test(11.7, 5.0), 0);
+    // Integer-anchored clicks behave unchanged either way.
+    assert_eq!(ui.hit_test(6.0, 5.0), text);
+    assert_eq!(ui.hit_test(13.0, 5.0), 0);
+}
+
+#[test]
+fn text_selection_rect_uses_the_painted_q7_anchor() {
+    let mut ui = Ui::new();
+    assert!(ui.load_font_atlas(&encode_atlas(
+        0,
+        8,
+        8,
+        7,
+        10,
+        2,
+        &[(0xfffd, 0, 8), ('A' as u32, 1, 6)],
+    )));
+    let text = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(text, spec::prop::WIDTH, 8.0);
+    ui.set_prop(text, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(text, spec::prop::SHRINK, 0.0);
+    ui.set_prop(text, spec::prop::FONT_SLOT, 0.0);
+    ui.set_prop(text, spec::prop::TRANSLATE_X, 3.5);
+    ui.set_prop(text, spec::prop::TRANSLATE_Y, 2.0);
+    ui.set_text(text, "A");
+    ui.insert_before(spec::ROOT_ID, text, 0);
+    ui.tick();
+
+    // The selection rect must start at the painted cell origin (3.5, 3),
+    // not the raw rounded anchor (4, 2).
+    let rect = ui
+        .node_text_selection_rect(text, 0.0, 0.0, 8.0, 8.0)
+        .expect("A's cell intersects the span");
+    assert_eq!(rect, (3.5, 3.0, 8.0, 8.0));
+}
+
+#[test]
+fn text_selection_rect_for_perspective_text_claims_projected_cells() {
+    let mut ui = Ui::new();
+    assert!(ui.load_font_atlas(&encode_atlas(
+        0,
+        8,
+        8,
+        7,
+        10,
+        3,
+        &[(0xfffd, 0, 8), ('A' as u32, 1, 6), ('B' as u32, 2, 5)],
+    )));
+    let stage = abs_box(&mut ui, spec::ROOT_ID, 100.0, 100.0, 60.0, 60.0);
+    ui.set_prop(stage, spec::prop::PERSPECTIVE, 300.0);
+
+    let projected = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(projected, spec::prop::POS_TYPE, spec::PosType::Absolute as u8 as f64);
+    ui.set_prop(projected, spec::prop::INSET_L, 10.0);
+    ui.set_prop(projected, spec::prop::INSET_T, 10.0);
+    ui.set_prop(projected, spec::prop::WIDTH, 40.0);
+    ui.set_prop(projected, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(projected, spec::prop::SHRINK, 0.0);
+    ui.set_prop(projected, spec::prop::FONT_SLOT, 0.0);
+    ui.set_prop(projected, spec::prop::ROTATE_Y, 30.0);
+    ui.set_text(projected, "AB");
+    ui.insert_before(stage, projected, 0);
+    ui.tick();
+
+    // Text in a perspective subtree anchors at the projected origin with
+    // upright cells; the selection rect is the union of those projected
+    // cells. A point just inside the rect must hit the text node, binding
+    // selection geometry to the same projected anchor the painter uses.
+    let rect = ui
+        .node_text_selection_rect(projected, 0.0, 0.0, 40.0, 20.0)
+        .expect("projected glyph cells intersect the span");
+    assert!(rect.2 > 0.0 && rect.3 > 0.0);
+    assert_eq!(ui.hit_test(rect.0 + 1.0, rect.1 + 1.0), projected);
+}
+
+#[test]
 fn font_atlas_v3_scales_coverage_without_scaling_layout_metrics() {
     let glyphs = &[(0xfffd, 0, 8), ('A' as u32, 1, 6), ('B' as u32, 2, 5)];
     let mut ui = Ui::new();
@@ -2297,6 +2621,107 @@ fn perspective_subdivided_images_form_one_texture_run_per_image() {
 }
 
 #[test]
+fn hit_test_matches_rounded_border_geometry() {
+    let mut ui = Ui::new();
+    let below = abs_box(&mut ui, spec::ROOT_ID, 10.0, 10.0, 40.0, 40.0);
+    let border = ui.create_node(0);
+    for (prop, value) in [
+        (spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64),
+        (spec::prop::INSET_L, 10.0),
+        (spec::prop::INSET_T, 10.0),
+        (spec::prop::WIDTH, 40.0),
+        (spec::prop::HEIGHT, 40.0),
+        (spec::prop::RADIUS, 10.0),
+        (spec::prop::BORDER_WIDTH, 3.0),
+        (spec::prop::BORDER_COLOR, abgr(255, 255, 255, 255) as f64),
+    ] {
+        ui.set_prop(border, prop, value);
+    }
+    ui.insert_before(spec::ROOT_ID, border, 0);
+
+    ui.tick();
+    assert_eq!(ui.hit_test(11.0, 11.0), below);
+    assert_eq!(ui.hit_test(30.0, 10.0), border);
+}
+
+#[test]
+fn hit_test_ignores_arcs_and_bevels_that_emit_no_pixels() {
+    let mut ui = Ui::new();
+    let below_arc = abs_box(&mut ui, spec::ROOT_ID, 10.0, 10.0, 40.0, 40.0);
+    let arc = ui.create_node(0);
+    for (prop, value) in [
+        (spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64),
+        (spec::prop::INSET_L, 10.0),
+        (spec::prop::INSET_T, 10.0),
+        (spec::prop::WIDTH, 40.0),
+        (spec::prop::HEIGHT, 40.0),
+        (spec::prop::BG_COLOR, abgr(255, 255, 255, 255) as f64),
+        (spec::prop::ARC_SWEEP, 180.0),
+        (spec::prop::ARC_WIDTH, 5.0),
+        (spec::prop::ROTATE, 45.0),
+    ] {
+        ui.set_prop(arc, prop, value);
+    }
+    ui.insert_before(spec::ROOT_ID, arc, 0);
+
+    let below_bevel = abs_box(&mut ui, spec::ROOT_ID, 100.0, 10.0, 5.0, 40.0);
+    let below_sector = abs_box(&mut ui, spec::ROOT_ID, 200.0, 10.0, 40.0, 40.0);
+    let sector = ui.create_node(0);
+    for (prop, value) in [
+        (spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64),
+        (spec::prop::INSET_L, 200.0),
+        (spec::prop::INSET_T, 10.0),
+        (spec::prop::WIDTH, 40.0),
+        (spec::prop::HEIGHT, 40.0),
+        (spec::prop::BG_COLOR, abgr(255, 255, 255, 255) as f64),
+        (spec::prop::ARC_START, 45.0),
+        (spec::prop::ARC_SWEEP, 180.0),
+        (spec::prop::ARC_WIDTH, 5.0),
+    ] {
+        ui.set_prop(sector, prop, value);
+    }
+    ui.insert_before(spec::ROOT_ID, sector, 0);
+
+    let bevel = ui.create_node(0);
+    for (prop, value) in [
+        (spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64),
+        (spec::prop::INSET_L, 100.0),
+        (spec::prop::INSET_T, 10.0),
+        (spec::prop::WIDTH, 5.0),
+        (spec::prop::HEIGHT, 40.0),
+        (spec::prop::BEVEL_WIDTH, 2.0),
+        (spec::prop::BEVEL_INNER_LIGHT, abgr(255, 255, 255, 255) as f64),
+    ] {
+        ui.set_prop(bevel, prop, value);
+    }
+    ui.insert_before(spec::ROOT_ID, bevel, 0);
+
+    let below_directional = abs_box(&mut ui, spec::ROOT_ID, 300.0, 10.0, 40.0, 40.0);
+    let directional = ui.create_node(0);
+    for (prop, value) in [
+        (spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64),
+        (spec::prop::INSET_L, 300.0),
+        (spec::prop::INSET_T, 10.0),
+        (spec::prop::WIDTH, 40.0),
+        (spec::prop::HEIGHT, 40.0),
+        (spec::prop::BEVEL_WIDTH, 2.0),
+        (spec::prop::BEVEL_INNER_LIGHT, abgr(255, 255, 255, 255) as f64),
+    ] {
+        ui.set_prop(directional, prop, value);
+    }
+    ui.insert_before(spec::ROOT_ID, directional, 0);
+
+    ui.tick();
+    assert_eq!(ui.hit_test(30.0, 30.0), below_arc);
+    assert_eq!(ui.hit_test(102.0, 30.0), below_bevel);
+    assert_eq!(ui.hit_test(220.0, 30.0), below_sector);
+    assert_eq!(ui.hit_test(238.0, 30.0), sector);
+    assert_eq!(ui.hit_test(220.0, 12.0), below_sector);
+    assert_eq!(ui.hit_test(302.0, 30.0), directional);
+    assert_eq!(ui.hit_test(339.0, 30.0), below_directional);
+}
+
+#[test]
 fn arc_primitive_emits_coverage_rects() {
     let mut ui = Ui::new();
     let mut arc = StyleSpec::new();
@@ -3010,6 +3435,47 @@ fn hit_test_topmost_wins_and_containers_pass_through() {
         toast,
         "painted overlay content claims"
     );
+    // Fully transparent gradients do not occlude visible content.
+    let transparent_gradient = ui.create_node(0);
+    ui.set_prop(
+        transparent_gradient,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
+    ui.set_prop(transparent_gradient, spec::prop::INSET_L, 80.0);
+    ui.set_prop(transparent_gradient, spec::prop::INSET_T, 30.0);
+    ui.set_prop(transparent_gradient, spec::prop::WIDTH, 40.0);
+    ui.set_prop(transparent_gradient, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(
+        transparent_gradient,
+        spec::prop::BG_COLOR,
+        abgr(0, 255, 0, 255) as f64,
+    );
+    ui.set_prop(
+        transparent_gradient,
+        spec::prop::GRAD_DIR,
+        spec::GradDir::ToRight as u32 as f64,
+    );
+    ui.set_prop(transparent_gradient, spec::prop::GRAD_FROM, 0.0);
+    ui.set_prop(transparent_gradient, spec::prop::GRAD_TO, 0.0);
+    ui.insert_before(spec::ROOT_ID, transparent_gradient, 0);
+    ui.tick();
+    assert_eq!(ui.hit_test(90.0, 40.0), toast);
+    // A text node with no loaded atlas emits no glyph run and must not occlude.
+    let invisible_text = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(
+        invisible_text,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
+    ui.set_prop(invisible_text, spec::prop::INSET_L, 80.0);
+    ui.set_prop(invisible_text, spec::prop::INSET_T, 30.0);
+    ui.set_prop(invisible_text, spec::prop::WIDTH, 40.0);
+    ui.set_prop(invisible_text, spec::prop::HEIGHT, 20.0);
+    ui.set_text(invisible_text, "not loaded");
+    ui.insert_before(spec::ROOT_ID, invisible_text, 0);
+    ui.tick();
+    assert_eq!(ui.hit_test(90.0, 40.0), toast);
     // Outside the viewport (half-open edges): nothing.
     assert_eq!(ui.hit_test(480.0, 100.0), 0);
     assert_eq!(ui.hit_test(-1.0, 100.0), 0);
@@ -3105,6 +3571,15 @@ fn hit_test_display_none_overflow_and_transforms() {
 #[test]
 fn hit_test_variant_styled_hotspots_and_perspective_roots_claim() {
     let mut ui = Ui::new();
+    assert!(ui.load_font_atlas(&encode_atlas(
+        0,
+        8,
+        8,
+        7,
+        10,
+        3,
+        &[(0xfffd, 0, 8), ('A' as u32, 1, 6), ('B' as u32, 2, 5)],
+    )));
     // A record whose BASE paints nothing but whose focus: variant does — the
     // hotspot must be reachable BEFORE it is hovered, with no hysteresis.
     let mut hotspot_style = StyleSpec::new();
@@ -3160,8 +3635,203 @@ fn hit_test_variant_styled_hotspots_and_perspective_roots_claim() {
     assert_eq!(
         ui.hit_test(130.0, 130.0),
         stage,
-        "3D context root claims, children untestable"
+        "3D context root claims, non-text children stay protected"
     );
+
+    let label = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(
+        label,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u8 as f64,
+    );
+    ui.set_prop(label, spec::prop::INSET_L, 10.0);
+    ui.set_prop(label, spec::prop::INSET_T, 10.0);
+    ui.set_prop(label, spec::prop::WIDTH, 40.0);
+    ui.set_prop(label, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(label, spec::prop::SHRINK, 0.0);
+    ui.set_text(label, "AB");
+    ui.insert_before(stage, label, 0);
+    ui.tick();
+    // Glyph-cell hit: the A cell covers screen (110..118, 110..118).
+    assert_eq!(ui.hit_test(112.0, 112.0), label);
+    // The empty part of the label's layout box no longer claims — the
+    // perspective root keeps swallowing what is painted behind it.
+    assert_eq!(ui.hit_test(130.0, 120.0), stage);
+
+    let edge_label = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(
+        edge_label,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u8 as f64,
+    );
+    ui.set_prop(edge_label, spec::prop::INSET_L, 0.0);
+    ui.set_prop(edge_label, spec::prop::INSET_T, 20.0);
+    ui.set_prop(edge_label, spec::prop::WIDTH, 20.0);
+    ui.set_prop(edge_label, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(edge_label, spec::prop::SHRINK, 0.0);
+    ui.set_prop(edge_label, spec::prop::TRANSLATE_Z, 100.0);
+    ui.set_text(edge_label, "AB");
+    ui.insert_before(stage, edge_label, 0);
+    ui.tick();
+    assert_eq!(ui.hit_test(90.0, 120.0), edge_label);
+}
+
+#[test]
+fn hit_test_text_claims_only_glyph_cells() {
+    let mut ui = Ui::new();
+    assert!(ui.load_font_atlas(&encode_atlas(
+        0,
+        8,
+        8,
+        7,
+        10,
+        3,
+        &[(0xfffd, 0, 8), ('A' as u32, 1, 6), ('B' as u32, 2, 5)],
+    )));
+    // A painted box underneath a wide text node: the layout box's empty
+    // side (beyond the glyph run) must pass through to the box beneath.
+    let under = abs_box(&mut ui, spec::ROOT_ID, 10.0, 10.0, 100.0, 20.0);
+    let label = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(
+        label,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u8 as f64,
+    );
+    ui.set_prop(label, spec::prop::INSET_L, 10.0);
+    ui.set_prop(label, spec::prop::INSET_T, 10.0);
+    ui.set_prop(label, spec::prop::WIDTH, 100.0);
+    ui.set_prop(label, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(label, spec::prop::SHRINK, 0.0);
+    ui.set_text(label, "AB");
+    ui.insert_before(spec::ROOT_ID, label, 0);
+    ui.tick();
+    // On the first glyph cell: the text claims.
+    assert_eq!(ui.hit_test(13.0, 12.0), label);
+    // In the empty tail of the layout box: the box beneath claims.
+    assert_eq!(ui.hit_test(90.0, 15.0), under);
+    // Glyph cells may extend beyond the layout box (wide cells, negative
+    // xoff): a click on that visible cell still claims the text.
+    let narrow = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(
+        narrow,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u8 as f64,
+    );
+    ui.set_prop(narrow, spec::prop::INSET_L, 130.0);
+    ui.set_prop(narrow, spec::prop::INSET_T, 10.0);
+    ui.set_prop(narrow, spec::prop::WIDTH, 8.0);
+    ui.set_prop(narrow, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(narrow, spec::prop::SHRINK, 0.0);
+    ui.set_text(narrow, "AB");
+    ui.insert_before(spec::ROOT_ID, narrow, 0);
+    ui.tick();
+    // B's 8px cell starts at x=6, so it extends past the 8px box edge;
+    // the click at local x=10 lands on the visible cell and must claim.
+    assert_eq!(ui.hit_test(140.0, 12.0), narrow);
+}
+
+#[test]
+fn hit_test_perspective_text_claims_only_projected_glyph_cells() {
+    let mut ui = Ui::new();
+    assert!(ui.load_font_atlas(&encode_atlas(
+        0,
+        8,
+        8,
+        7,
+        10,
+        3,
+        &[(0xfffd, 0, 8), ('A' as u32, 1, 6), ('B' as u32, 2, 5)],
+    )));
+    let stage = abs_box(&mut ui, spec::ROOT_ID, 100.0, 100.0, 60.0, 60.0);
+    ui.set_prop(stage, spec::prop::PERSPECTIVE, 300.0);
+    let under = abs_box(&mut ui, stage, 10.0, 10.0, 40.0, 40.0);
+
+    let label = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(
+        label,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u8 as f64,
+    );
+    ui.set_prop(label, spec::prop::INSET_L, 10.0);
+    ui.set_prop(label, spec::prop::INSET_T, 10.0);
+    ui.set_prop(label, spec::prop::WIDTH, 40.0);
+    ui.set_prop(label, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(label, spec::prop::SHRINK, 0.0);
+    ui.set_text(label, "AB");
+    ui.insert_before(stage, label, 0);
+    ui.tick();
+    // Projected glyph cell: the perspective root routes the hit to text.
+    assert_eq!(ui.hit_test(112.0, 112.0), label);
+    // Projected layout-box tail (beyond the glyph run, inside the stage):
+    // the 3D root still swallows, but the text node itself must not claim.
+    assert_eq!(ui.hit_test(140.0, 120.0), stage);
+    let _ = under;
+}
+
+#[test]
+fn hit_test_perspective_text_respects_clip_and_depth() {
+    let mut ui = Ui::new();
+    assert!(ui.load_font_atlas(&encode_atlas(
+        0,
+        8,
+        8,
+        7,
+        10,
+        3,
+        &[(0xfffd, 0, 8), ('A' as u32, 1, 6), ('B' as u32, 2, 5)],
+    )));
+    let stage = abs_box(&mut ui, spec::ROOT_ID, 100.0, 100.0, 60.0, 60.0);
+    ui.set_prop(stage, spec::prop::PERSPECTIVE, 300.0);
+
+    let far = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(far, spec::prop::POS_TYPE, spec::PosType::Absolute as u8 as f64);
+    ui.set_prop(far, spec::prop::INSET_L, 20.0);
+    ui.set_prop(far, spec::prop::INSET_T, 20.0);
+    ui.set_prop(far, spec::prop::WIDTH, 20.0);
+    ui.set_prop(far, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(far, spec::prop::SHRINK, 0.0);
+    ui.set_prop(far, spec::prop::TRANSLATE_Z, -50.0);
+    ui.set_text(far, "AB");
+    ui.insert_before(stage, far, 0);
+
+    let near = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(near, spec::prop::POS_TYPE, spec::PosType::Absolute as u8 as f64);
+    ui.set_prop(near, spec::prop::INSET_L, 20.0);
+    ui.set_prop(near, spec::prop::INSET_T, 20.0);
+    ui.set_prop(near, spec::prop::WIDTH, 20.0);
+    ui.set_prop(near, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(near, spec::prop::SHRINK, 0.0);
+    ui.set_prop(near, spec::prop::TRANSLATE_Z, 50.0);
+    ui.set_text(near, "AB");
+    ui.insert_before(stage, near, 0);
+
+    let edge = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(edge, spec::prop::POS_TYPE, spec::PosType::Absolute as u8 as f64);
+    ui.set_prop(edge, spec::prop::INSET_L, 0.0);
+    ui.set_prop(edge, spec::prop::INSET_T, 20.0);
+    ui.set_prop(edge, spec::prop::WIDTH, 20.0);
+    ui.set_prop(edge, spec::prop::HEIGHT, 20.0);
+    ui.set_prop(edge, spec::prop::SHRINK, 0.0);
+    ui.set_prop(edge, spec::prop::TRANSLATE_Z, 100.0);
+    ui.set_text(edge, "AB");
+    ui.insert_before(stage, edge, 0);
+
+    ui.tick();
+    assert_eq!(ui.hit_test(130.0, 125.0), near);
+    assert_eq!(ui.hit_test(90.0, 120.0), edge);
+
+    ui.set_prop(edge, spec::prop::TEXT_COLOR, abgr(255, 255, 255, 0) as f64);
+    ui.tick();
+    assert_eq!(ui.hit_test(90.0, 120.0), 0);
+    ui.set_prop(edge, spec::prop::TEXT_COLOR, abgr(255, 255, 255, 255) as f64);
+
+    ui.set_prop(
+        stage,
+        spec::prop::OVERFLOW,
+        spec::Overflow::Hidden as u8 as f64,
+    );
+    ui.tick();
+    assert_eq!(ui.hit_test(90.0, 120.0), 0);
 }
 
 #[test]

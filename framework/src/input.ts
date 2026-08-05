@@ -52,6 +52,11 @@ let pressedNode: NodeMirror | null = null;
 let pointerPressTarget: NodeMirror | null = null;
 /** Node whose focus was established by the desktop pointer hover. */
 let pointerHoverFocus: NodeMirror | null = null;
+let textSelectionPointer: { owner: NodeMirror; dragged: boolean } | null = null;
+let textSelectionPointerDispatch: ((x: number, y: number, down: boolean) => boolean) | null = null;
+let textSelectionPointerCancel: (() => void) | null = null;
+let textSelectionPointerCaptured: (() => boolean) | null = null;
+let textSelectionPointerClear: (() => void) | null = null;
 let prevButtons = 0;
 const focusScopeStack: NodeMirror[] = [];
 const focusGridStack: FocusGridRegistration[] = [];
@@ -100,7 +105,74 @@ export function setInputRoot(r: NodeMirror | null): void {
  *  touching host ops — the host may already be a different instance). */
 export function resetInput(): void {
   cursor = null;
+  textSelectionPointer = null;
   setInputRoot(null);
+}
+
+/** Record the host mouse disposition before the native pointer frame runs. */
+export function setTextSelectionPointer(
+  owner: NodeMirror | null,
+  down: boolean,
+  dragged: boolean,
+): void {
+  // 记录文字指针接触的拖拽状态。
+  if (!owner || !down && !dragged) {
+    textSelectionPointer = null;
+    return;
+  }
+  textSelectionPointer = { owner, dragged };
+}
+
+/** Cancel a pending text-selection pointer disposition. */
+export function clearTextSelectionPointer(): void {
+  // 清除文字指针接触状态。
+  textSelectionPointer = null;
+}
+
+/** Bind native pointer frames to the framework's selectable-text router. */
+export function setTextSelectionPointerDispatcher(
+  dispatch: ((x: number, y: number, down: boolean) => boolean) | null,
+  cancel: (() => void) | null = null,
+  captured: (() => boolean) | null = null,
+  clear: (() => void) | null = null,
+): void {
+  // 绑定原生指针到文字选择路由。
+  textSelectionPointerDispatch = dispatch;
+  textSelectionPointerCancel = cancel;
+  textSelectionPointerCaptured = captured;
+  textSelectionPointerClear = clear;
+}
+
+/** Report whether native pointer movement has a selectable-text owner. */
+export function hasTextSelectionPointerCapture(): boolean {
+  // 查询原生文字指针是否保持捕获。
+  return textSelectionPointerCaptured?.() ?? false;
+}
+
+/** Forward one native pointer contact to selectable text when registered. */
+export function dispatchTextSelectionPointer(x: number, y: number, down: boolean): boolean {
+  // 分发一帧原生文字指针接触。
+  return textSelectionPointerDispatch?.(x, y, down) ?? false;
+}
+
+/** End native selectable-text capture after the pointer leaves the window. */
+export function cancelTextSelectionPointer(): void {
+  // 结束离窗后的原生文字指针捕获。
+  textSelectionPointerCancel?.();
+}
+
+/** Clear the shared text-selection interaction state. */
+export function clearTextSelectionInteraction(): void {
+  // 清除共享文字选择交互状态。
+  textSelectionPointerClear?.();
+  pointerPressTarget = null;
+  setPressedNode(null);
+}
+
+/** Whether a completed text drag must not activate an action ancestor. */
+export function suppressTextSelectionClick(): boolean {
+  // 查询文字拖拽是否应抑制动作点击。
+  return textSelectionPointer?.dragged ?? false;
 }
 
 // ---- registries (renderer setProperty dispatch targets) --------------------
@@ -735,6 +807,24 @@ export function setHitRoot(r: NodeMirror | null): void {
   hitRoot = r;
 }
 
+/** Resolve framework-only overlay hits to the node they visually cover. */
+function resolveHitTarget(hit: NodeMirror | null): NodeMirror | null {
+  let n = hit;
+  const seen = new Set<NodeMirror>();
+  while (n?.hitTarget && !seen.has(n)) {
+    seen.add(n);
+    n = n.hitTarget;
+  }
+  return n;
+}
+
+/** The raw painted node under a screen point, after overlay redirection. */
+export function hitNode(x: number, y: number): NodeMirror | null {
+  const ops = getOps();
+  if (!ops.hitTest) return null;
+  return resolveHitTarget(findMirror(hitRoot ?? root, ops.hitTest(x, y)));
+}
+
 /** The interaction target for a raw hit: the nearest focusable ancestor
  *  the active focus scope can see. Only an explicitly pushed scope
  *  restricts (modal backgrounds stay inert while a Modal's FocusScope is
@@ -742,7 +832,7 @@ export function setHitRoot(r: NodeMirror | null): void {
 function cursorTarget(hit: NodeMirror | null): NodeMirror | null {
   const scope =
     focusScopeStack.length > 0 ? focusScopeStack[focusScopeStack.length - 1] : null;
-  let n = hit;
+  let n = resolveHitTarget(hit);
   while (n) {
     if (n.focusable && (!scope || isWithin(n, scope))) return n;
     n = n.parent;
@@ -757,9 +847,7 @@ function cursorTarget(hit: NodeMirror | null): NodeMirror | null {
  * hitTest op or nothing focusable is under the point.
  */
 export function hitFocusable(x: number, y: number): NodeMirror | null {
-  const ops = getOps();
-  if (!ops.hitTest) return null;
-  return cursorTarget(findMirror(hitRoot ?? root, ops.hitTest(x, y)));
+  return cursorTarget(hitNode(x, y));
 }
 
 /** One cursor-mode frame. Returns false when the host predates the cursor
@@ -878,15 +966,36 @@ function pointerContactFrame(buttons: number, pressed: number, released: number)
   // absent; touch gestures have their own public API and lifecycle.
   const pointer = pointerPosition();
   if (!pointer) {
-    // Leaving the window cancels the active visual but retains the press
-    // target until release, so re-entry follows the documented cursor model.
+    // Leaving the window cancels live text capture but retains a completed
+    // drag's click-suppression marker until the physical release.
     const hadPressTarget = pointerPressTarget !== null;
-    const hadPointerState = hadPressTarget || pointerHoverFocus !== null;
+    const hadTextCapture = hasTextSelectionPointerCapture();
+    // Live pointer-owned state only: a bare suppression marker from a
+    // completed shell drag must not swallow a fresh missing-pointer CIRCLE.
+    const hadPointerState =
+      hadPressTarget || pointerHoverFocus !== null || hadTextCapture;
     const shouldClearHover =
       pointerHoverFocus !== null &&
       !hadPressTarget &&
       focused === pointerHoverFocus;
-    if (released & BTN.CIRCLE) pointerPressTarget = null;
+    const textOwner = textSelectionPointer?.owner ?? null;
+    const textWasDragged = textSelectionPointer?.dragged ?? false;
+<<<<<<< Updated upstream
+    const hadTextCapture = hasTextSelectionPointerCapture();
+=======
+>>>>>>> Stashed changes
+    if (hadTextCapture) {
+      cancelTextSelectionPointer();
+      clearTextSelectionPointer();
+      if (!(released & BTN.CIRCLE) && textOwner && textWasDragged) {
+        setTextSelectionPointer(textOwner, false, true);
+      }
+    }
+    if (released & BTN.CIRCLE) {
+      pointerPressTarget = null;
+      if (!hadTextCapture) cancelTextSelectionPointer();
+      clearTextSelectionPointer();
+    }
     setPressedNode(null);
     if ((shouldClearHover || (released & BTN.CIRCLE && hadPressTarget)) && focused) {
       focusNode(null);
@@ -899,6 +1008,16 @@ function pointerContactFrame(buttons: number, pressed: number, released: number)
     );
   }
   const contact = pointer;
+  let textPointerHandled = false;
+  if ((pressed & BTN.CIRCLE) !== 0 || hasTextSelectionPointerCapture()) {
+    textPointerHandled = dispatchTextSelectionPointer(contact.x, contact.y, true);
+  }
+  if ((pressed & BTN.CIRCLE) !== 0 && !textPointerHandled) {
+    clearTextSelectionInteraction();
+  }
+  if (released & BTN.CIRCLE) {
+    dispatchTextSelectionPointer(contact.x, contact.y, false);
+  }
   const target = hitFocusable(contact.x, contact.y);
   const preservingPress = pointerPressTarget !== null && (buttons & BTN.CIRCLE) !== 0;
   // Hover never focuses editable controls; click handling below owns that transition.
@@ -910,8 +1029,10 @@ function pointerContactFrame(buttons: number, pressed: number, released: number)
     if (target !== focused) focusNode(target);
   }
   if (released & BTN.CIRCLE) {
-    const fire = pointerPressTarget !== null && target === pointerPressTarget;
+    const suppress = suppressTextSelectionClick();
+    const fire = pointerPressTarget !== null && target === pointerPressTarget && !suppress;
     pointerPressTarget = null;
+    clearTextSelectionPointer();
     setPressedNode(null);
     if (fire) firePress();
   } else if (pointerPressTarget) {

@@ -28,6 +28,23 @@ export interface BuildHostContract {
   readonly hostAbi: number;
 }
 
+/** Resolved native text metrics for pointer mapping and selection painting. */
+export interface NodeTextLayout {
+  width: number;
+  fontSlot: number;
+  textAlign: number;
+  tracking: number;
+  lineHeight: number;
+}
+
+/** Screen-space bounds of a node-local rectangle. */
+export interface NodeScreenRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 /** The `ui.*` op surface. Node ids are generation-tagged positive i32 values;
  *  node id 0 means "none" (anchor 0 = append, setFocus 0 = clear). Texture
  *  handles have operation-specific 0-based or generation-tagged contracts. */
@@ -97,6 +114,24 @@ export interface HostOps {
   nodeLocalX?(): number;
   /** Native staged result for nodeLocalPoint. */
   nodeLocalY?(): number;
+  /** Resolve the native text layout used by a text node. */
+  nodeTextLayout?(id: number): NodeTextLayout | null;
+  /** Map a node-local rectangle through the current native transform. */
+  nodeScreenRect?(
+    id: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ): NodeScreenRect | null;
+  /** Map a text selection span through native glyph-cell geometry. */
+  nodeTextSelectionRect?(
+    id: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ): NodeScreenRect | null;
   /** Bind the cursor sprite: an uploaded texture drawn topmost every frame,
    *  offset by its hotspot; never laid out, never hit-tested. tex < 0 hides
    *  it; w/h <= 0 draw at the texture's own pixel size. */

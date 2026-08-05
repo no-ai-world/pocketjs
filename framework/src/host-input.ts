@@ -7,13 +7,20 @@ import { getOps } from "./host.ts";
 import {
   blurFocus,
   clearPointerHover,
+  clearTextSelectionPointer,
   focusNode,
   getFocused,
   hitFocusable,
+  hitNode,
   moveFocusByTab,
   onFocusChange,
   restoreFocus,
+  setTextSelectionPointerDispatcher,
 } from "./input.ts";
+import {
+  clearTextSelection as resetTextSelection,
+  reconcileTextSelection,
+} from "./text-selection.ts";
 import type { NodeMirror } from "./native-tree.ts";
 
 /** 壳 → guest 的稳定输入事件（不含 companion 业务 JSON）。 */
@@ -80,10 +87,27 @@ export type EditableHandler = {
   caretRect?: () => HostCaretRect | null;
 };
 
+export type CopyText = (text: string) => void;
+
+export type SelectableHandler = {
+  /** 文本是否接受选择输入。 */
+  active: () => boolean;
+  onKey?: (key: string, shift: boolean, copy: CopyText) => void;
+  onPointer?: (x: number, y: number, down: boolean, shift: boolean) => void;
+  onCancel?: () => void;
+};
+
 const editableHandlers = new WeakMap<NodeMirror, EditableHandler>();
+const selectableHandlers = new WeakMap<NodeMirror, SelectableHandler>();
+let selectableCapture: NodeMirror | null = null;
+let selectableOwner: NodeMirror | null = null;
+let selectableCount = 0;
+let selectablePumpDisposer: (() => void) | null = null;
+let manualHostInput = false;
 let pumpUsers = 0;
 let pumpChannelName: string | null = null;
 let pumpChannel: { send(line: object | string): void } | null = null;
+let pumpInput: NonNullable<ReturnType<typeof connectHostInput>> | null = null;
 let pumpDisposer: (() => void) | null = null;
 let lastCaret: HostCaretRect | null = null;
 let mouseCapture: NodeMirror | null = null;
@@ -91,6 +115,7 @@ let pumpHostFocused = true;
 
 /** 同帧共享 raw 行缓冲：宿主只有一条 svc 队列，按帧复用避免互排空。 */
 let rawBuffer: { lines: string[]; frame: number } | null = null;
+let lastPumpFrame = -1;
 
 function drainRaw(): string[] {
   const ops = getOps();
@@ -117,9 +142,93 @@ export function getEditableHandler(node: NodeMirror | null): EditableHandler | n
   return editableHandlers.get(node) ?? null;
 }
 
+export function registerSelectable(node: NodeMirror, handler: SelectableHandler | null): void {
+  // 管理一个可选文字节点的输入注册。
+  if (!handler) {
+    const previous = selectableHandlers.get(node);
+    previous?.onCancel?.();
+    selectableHandlers.delete(node);
+    selectableCount = Math.max(0, selectableCount - (previous ? 1 : 0));
+    if (selectableCount === 0) {
+      selectablePumpDisposer?.();
+      selectablePumpDisposer = null;
+    }
+    if (selectableCapture === node) selectableCapture = null;
+    if (selectableOwner === node) {
+      selectableOwner = null;
+      resetTextSelection();
+    }
+    return;
+  }
+  if (!selectableHandlers.has(node)) {
+    selectableCount++;
+    if (selectableCount === 1 && !manualHostInput) {
+      selectablePumpDisposer = installHostInputPump({ bindCleanup: false });
+    }
+  }
+  selectableHandlers.set(node, handler);
+}
+
+/** Clear the active all-text selection and its pointer ownership. */
+export function clearSelectableTextSelection(): void {
+  // 清除共享可选文字的输入状态。
+  const owner = selectableCapture ?? selectableOwner;
+  if (owner) selectableHandlers.get(owner)?.onCancel?.();
+  selectableCapture = null;
+  selectableOwner = null;
+  resetTextSelection();
+}
+
+function hasEditableAncestor(node: NodeMirror): boolean {
+  // 判断文字节点是否位于可编辑控件内。
+  let current: NodeMirror | null = node;
+  while (current) {
+    if (current.focusKind === "editable" || editableHandlers.has(current)) return true;
+    current = current.parent;
+  }
+  return false;
+}
+
+function selectableAt(x: number, y: number): NodeMirror | null {
+  // 查找指针位置上的可选文字节点。
+  let current = hitNode(x, y);
+  while (current) {
+    const handler = selectableHandlers.get(current);
+    if (handler && handler.active() && !hasEditableAncestor(current)) return current;
+    current = current.parent;
+  }
+  return null;
+}
+
+function dispatchToSelectable(
+  ev: HostInputEvent,
+  handler: SelectableHandler,
+  capturedMouse = false,
+): void {
+  // 向可选文字节点分发输入事件。
+  if (!handler.active()) return;
+  switch (ev.t) {
+    case "key":
+      if (ev.k) handler.onKey?.(ev.k, ev.sh ?? false, sendClipboardText);
+      break;
+    case "mouse":
+      handler.onPointer?.(ev.x, ev.y, ev.d ?? capturedMouse, ev.sh ?? false);
+      break;
+    default:
+      break;
+  }
+}
+
+function sendClipboardText(text: string): void {
+  // 将选中文本发送到宿主剪贴板。
+  if (!text) return;
+  (pumpChannel ?? resolveInputChannel("input"))?.send({ t: "copy", text });
+}
+
 onFocusChange((previous, next) => {
   if (previous !== next) {
     if (mouseCapture && mouseCapture !== next) mouseCapture = null;
+    if (next && selectableOwner) clearSelectableTextSelection();
     getEditableHandler(previous)?.onBlur?.();
   }
 });
@@ -307,6 +416,11 @@ export function connectNoteHost(): {
 } | null {
   const channel = openHostChannel("note") ?? openHostChannel("input");
   if (!channel) return null;
+  const selectablePump = selectablePumpDisposer;
+  selectablePumpDisposer = null;
+  selectablePump?.();
+  clearSelectableTextSelection();
+  manualHostInput = true;
   return {
     poll() {
       const events: HostInputEvent[] = [];
@@ -351,11 +465,57 @@ function dispatchToEditable(
   }
 }
 
-/** Route mouse events with blank-click blur and editable drag capture. */
+function dispatchSelectablePointer(x: number, y: number, down: boolean): boolean {
+  // 路由一帧指针接触到可选文字节点。
+  if (manualHostInput) return false;
+  if (!down) {
+    if (!selectableCapture) return false;
+    const capture = selectableCapture;
+    selectableCapture = null;
+    const handler = selectableHandlers.get(capture);
+    if (handler) dispatchToSelectable({ t: "mouse", x, y, d: false }, handler, true);
+    return true;
+  }
+
+  const selectable = selectableCapture ?? selectableAt(x, y);
+  if (!selectable) return false;
+  if (!selectableCapture) {
+    if (selectableOwner !== selectable) clearSelectableTextSelection();
+    mouseCapture = null;
+    const hit = hitFocusable(x, y);
+    if (hit !== getFocused()) focusNode(hit);
+    selectableCapture = selectable;
+    selectableOwner = selectable;
+  }
+  const handler = selectableHandlers.get(selectable);
+  if (handler) dispatchToSelectable({ t: "mouse", x, y, d: true }, handler, true);
+  return true;
+}
+
+function cancelSelectablePointer(): void {
+  // 清除可选文字的指针捕获。
+  const capture = selectableCapture;
+  selectableCapture = null;
+  if (capture) selectableHandlers.get(capture)?.onCancel?.();
+  clearTextSelectionPointer();
+}
+
+setTextSelectionPointerDispatcher(
+  dispatchSelectablePointer,
+  cancelSelectablePointer,
+  () => selectableCapture !== null,
+  clearSelectableTextSelection,
+);
+
+/** Route mouse events with text selection before editable capture. */
 function dispatchMouseEvent(
   ev: Extract<HostInputEvent, { t: "mouse" }>,
 ): void {
   if (ev.outside && ev.d === false) {
+    if (dispatchSelectablePointer(ev.x, ev.y, false)) {
+      focusNode(null);
+      return;
+    }
     if (mouseCapture) {
       const handler = getEditableHandler(mouseCapture);
       if (handler) dispatchToEditable(ev, handler);
@@ -366,9 +526,18 @@ function dispatchMouseEvent(
     }
     return;
   }
-  const hit = hitFocusable(ev.x, ev.y);
+
+  if (selectableCapture) {
+    dispatchSelectablePointer(ev.x, ev.y, ev.d !== false);
+    return;
+  }
+
+  if (ev.d === true && dispatchSelectablePointer(ev.x, ev.y, true)) return;
+
   if (ev.d === true) {
+    clearSelectableTextSelection();
     if (!mouseCapture) {
+      const hit = hitFocusable(ev.x, ev.y);
       if (!hit) {
         focusNode(null);
         return;
@@ -394,6 +563,7 @@ function dispatchMouseEvent(
     return;
   }
 
+  const hit = hitFocusable(ev.x, ev.y);
   // Hover never focuses editable controls; click handling above owns that transition.
   if (hit?.focusKind !== "editable") {
     if (hit && hit !== getFocused()) focusNode(hit);
@@ -403,12 +573,90 @@ function dispatchMouseEvent(
   if (handler) dispatchToEditable(ev, handler);
 }
 
+/** Run one host-input turn for the active framework frame loop. */
+export function runHostInputPump(): void {
+  // 运行当前框架的一轮宿主输入分发。
+  if (manualHostInput) return;
+  const input = pumpInput;
+  if (!input) {
+    reconcileTextSelection();
+    return;
+  }
+  const frame = virtualFrame();
+  if (lastPumpFrame === frame) return;
+  lastPumpFrame = frame;
+  reconcileTextSelection();
+  for (const ev of input.poll()) {
+    if (ev.t === "blur") {
+      // Blur is a shell lifecycle event, not an editable event. It must
+      // clear action focus and pointer capture even when no editable
+      // handler is currently active.
+      pumpHostFocused = false;
+      clearSelectableTextSelection();
+      mouseCapture = null;
+      blurFocus();
+      continue;
+    }
+    if (ev.t === "focus") {
+      pumpHostFocused = true;
+      restoreFocus();
+      continue;
+    }
+    // Drop queued interactive events until the shell restores focus.
+    if (!pumpHostFocused && (
+      ev.t === "ch" || ev.t === "key" || ev.t === "paste" || ev.t === "ime" ||
+      ev.t === "mouse" || ev.t === "mouse_leave" || ev.t === "scroll"
+    )) continue;
+    const focused = getFocused();
+    const handler = getEditableHandler(focused);
+    if (ev.t === "key" && ev.k === "Tab") {
+      clearSelectableTextSelection();
+      moveFocusByTab(ev.sh ? -1 : 1);
+      continue;
+    }
+    if (ev.t === "mouse_leave") {
+      // A leave clears hover without canceling a native pointer owner or
+      // an active editable drag; release/blur owns cancellation.
+      if (!mouseCapture) clearPointerHover();
+      continue;
+    }
+    if (ev.t === "mouse") {
+      dispatchMouseEvent(ev);
+      continue;
+    }
+    if (handler) dispatchToEditable(ev, handler);
+    else if (ev.t === "key" && selectableOwner) {
+      const selectable = selectableHandlers.get(selectableOwner);
+      if (selectable) dispatchToSelectable(ev, selectable);
+      else selectableOwner = null;
+    }
+    // 无 editable 时 ch/key 不投递（按钮焦点不吞文本）
+  }
+
+  const live = pumpHostFocused ? getEditableHandler(getFocused()) : undefined;
+  const rect = live?.caretRect?.() ?? null;
+  if (
+    rect &&
+    (!lastCaret ||
+      rect.node !== lastCaret.node ||
+      rect.x !== lastCaret.x ||
+      rect.y !== lastCaret.y ||
+      rect.h !== lastCaret.h)
+  ) {
+    lastCaret = rect;
+    input.send({ t: "caret", ...rect });
+  } else if (!rect && lastCaret) {
+    lastCaret = null;
+    input.send({ t: "caret_clear" });
+  }
+}
+
 /**
  * 安装框架级壳输入泵：按焦点投递文本/编辑键，Tab 遍历焦点。
  * 引用计数；无 input 通道时 no-op。
  */
-export function installHostInputPump(opts?: { channelName?: string }): () => void {
-  // Keep one frame pump alive until every caller releases its registration.
+export function installHostInputPump(opts?: { channelName?: string; bindCleanup?: boolean }): () => void {
+  // 管理宿主输入泵的共享生命周期。
   const channelName = opts?.channelName ?? "input";
   if (pumpUsers > 0 && pumpChannelName !== channelName) {
     throw new Error(
@@ -422,69 +670,13 @@ export function installHostInputPump(opts?: { channelName?: string }): () => voi
 
   if (!pumpDisposer) {
     pumpChannel = input;
-    pumpDisposer = onFramePersistent(() => {
-      for (const ev of input.poll()) {
-        if (ev.t === "blur") {
-          // Blur is a shell lifecycle event, not an editable event. It must
-          // clear action focus and pointer capture even when no editable
-          // handler is currently active.
-          pumpHostFocused = false;
-          mouseCapture = null;
-          blurFocus();
-          continue;
-        }
-        if (ev.t === "focus") {
-          pumpHostFocused = true;
-          restoreFocus();
-          continue;
-        }
-        // Drop queued interactive events until the shell restores focus.
-        if (!pumpHostFocused && (
-          ev.t === "ch" || ev.t === "key" || ev.t === "paste" || ev.t === "ime" ||
-          ev.t === "mouse" || ev.t === "mouse_leave" || ev.t === "scroll"
-        )) continue;
-        const focused = getFocused();
-        const handler = getEditableHandler(focused);
-        if (ev.t === "key" && ev.k === "Tab") {
-          moveFocusByTab(ev.sh ? -1 : 1);
-          continue;
-        }
-        if (ev.t === "mouse_leave") {
-          // A leave clears hover without canceling a native pointer owner or
-          // an active editable drag; release/blur owns cancellation.
-          if (!mouseCapture) clearPointerHover();
-          continue;
-        }
-        if (ev.t === "mouse") {
-          dispatchMouseEvent(ev);
-          continue;
-        }
-        if (handler) dispatchToEditable(ev, handler);
-        // 无 editable 时 ch/key 不投递（按钮焦点不吞文本）
-      }
-
-      const live = pumpHostFocused ? getEditableHandler(getFocused()) : undefined;
-      const rect = live?.caretRect?.() ?? null;
-      if (
-        rect &&
-        (!lastCaret ||
-          rect.node !== lastCaret.node ||
-          rect.x !== lastCaret.x ||
-          rect.y !== lastCaret.y ||
-          rect.h !== lastCaret.h)
-      ) {
-        lastCaret = rect;
-        input.send({ t: "caret", ...rect });
-      } else if (!rect && lastCaret) {
-        lastCaret = null;
-        input.send({ t: "caret_clear" });
-      }
-    });
+    pumpInput = input;
+    pumpDisposer = onFramePersistent(runHostInputPump);
   }
 
   let disposed = false;
   const dispose = () => {
-    // Release this caller without tearing down other input users.
+    // 释放一个宿主输入泵引用。
     if (disposed) return;
     disposed = true;
     pumpUsers = Math.max(0, pumpUsers - 1);
@@ -494,12 +686,16 @@ export function installHostInputPump(opts?: { channelName?: string }): () => voi
     pumpDisposer = null;
     pumpChannelName = null;
     pumpChannel = null;
+    pumpInput = null;
     lastCaret = null;
     rawBuffer = null;
+    lastPumpFrame = -1;
     mouseCapture = null;
+    clearSelectableTextSelection();
+    manualHostInput = false;
     pumpHostFocused = true;
   };
-  onCleanup(dispose);
+  if (opts?.bindCleanup !== false) onCleanup(dispose);
   return dispose;
 }
 
@@ -514,7 +710,10 @@ export function ensureText(text: string): void {
 function clearLocalHostInputState(): void {
   // Drop buffered rows, pointer capture, and the cached IME rectangle together.
   rawBuffer = null;
+  lastPumpFrame = -1;
   mouseCapture = null;
+  clearSelectableTextSelection();
+  manualHostInput = false;
   lastCaret = null;
   pumpHostFocused = true;
 }
@@ -533,5 +732,6 @@ export function __resetHostInputForTest(): void {
   pumpUsers = 0;
   pumpChannelName = null;
   pumpChannel = null;
+  pumpInput = null;
   clearLocalHostInputState();
 }

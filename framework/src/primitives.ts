@@ -5,7 +5,9 @@
 // host tags directly. This file intentionally contains no JSX so ordinary Bun
 // tests can import the public entry without a Solid transform step.
 
-import type { JSX as SolidJSX } from "solid-js";
+import { onCleanup, type JSX as SolidJSX } from "solid-js";
+import { createTextSelectionHandler } from "./text-selection.ts";
+import { registerSelectable } from "./host-input.ts";
 import { createElement, spread } from "./renderer.ts";
 import type { NodeMirror } from "./renderer.ts";
 
@@ -78,7 +80,14 @@ export function View(props: ViewProps): SolidJSX.Element {
 }
 
 export function Text(props: TextProps): SolidJSX.Element {
-  return primitive("text", props as Record<string, unknown>);
+  // 创建可选择的文字节点。
+  const node = primitive("text", props as Record<string, unknown>) as unknown as NodeMirror;
+  registerSelectable(node, createTextSelectionHandler(node));
+  onCleanup(() => {
+    // 释放文字节点的选择注册。
+    registerSelectable(node, null);
+  });
+  return node as unknown as SolidJSX.Element;
 }
 
 export function Image(props: ImageProps): SolidJSX.Element {

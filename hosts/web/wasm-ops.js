@@ -123,6 +123,59 @@ export async function createWasmUi(wasm, options = {}) {
       return { x: ex.ui_node_local_x(), y: ex.ui_node_local_y() };
     };
   }
+  if (
+    ex.ui_node_text_layout &&
+    ex.ui_node_text_width &&
+    ex.ui_node_text_font_slot &&
+    ex.ui_node_text_align &&
+    ex.ui_node_text_tracking &&
+    ex.ui_node_text_line_height
+  ) {
+    ops.nodeTextLayout = (id) => {
+      if (!ex.ui_node_text_layout(id)) return null;
+      return {
+        width: ex.ui_node_text_width(),
+        fontSlot: ex.ui_node_text_font_slot(),
+        textAlign: ex.ui_node_text_align(),
+        tracking: ex.ui_node_text_tracking(),
+        lineHeight: ex.ui_node_text_line_height(),
+      };
+    };
+  }
+  if (
+    ex.ui_node_screen_rect &&
+    ex.ui_node_screen_rect_x &&
+    ex.ui_node_screen_rect_y &&
+    ex.ui_node_screen_rect_w &&
+    ex.ui_node_screen_rect_h
+  ) {
+    ops.nodeScreenRect = (id, x, y, w, h) => {
+      if (!ex.ui_node_screen_rect(id, x, y, w, h)) return null;
+      return {
+        x: ex.ui_node_screen_rect_x(),
+        y: ex.ui_node_screen_rect_y(),
+        width: ex.ui_node_screen_rect_w(),
+        height: ex.ui_node_screen_rect_h(),
+      };
+    };
+  }
+  if (
+    ex.ui_node_text_selection_rect &&
+    ex.ui_node_screen_rect_x &&
+    ex.ui_node_screen_rect_y &&
+    ex.ui_node_screen_rect_w &&
+    ex.ui_node_screen_rect_h
+  ) {
+    ops.nodeTextSelectionRect = (id, x, y, w, h) => {
+      if (!ex.ui_node_text_selection_rect(id, x, y, w, h)) return null;
+      return {
+        x: ex.ui_node_screen_rect_x(),
+        y: ex.ui_node_screen_rect_y(),
+        width: ex.ui_node_screen_rect_w(),
+        height: ex.ui_node_screen_rect_h(),
+      };
+    };
+  }
   if (ex.ui_set_cursor) {
     ops.setCursor = (tex, hotX, hotY, w, h) => ex.ui_set_cursor(tex, hotX, hotY, w, h);
   }

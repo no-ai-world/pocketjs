@@ -12,3 +12,9 @@ export function getOverlayRoot(): NodeMirror {
   }
   return overlayRoot;
 }
+
+/** Read the overlay root without requiring a mounted application. */
+export function getOverlayRootOrNull(): NodeMirror | null {
+  // 读取当前覆盖层根节点。
+  return overlayRoot;
+}

@@ -47,6 +47,8 @@ export interface BakedAtlas {
   /** Logical cell dimensions; coverage dimensions are these times rasterDensity. */
   cellW: number;
   cellH: number;
+  /** Native default line height in logical px. */
+  lineHeight: number;
   coverageW: number;
   coverageH: number;
 }
@@ -371,6 +373,7 @@ export function bakeSlot(
     glyphCount,
     cellW,
     cellH,
+    lineHeight,
     coverageW,
     coverageH,
   };

@@ -284,15 +284,6 @@ if (styles.records.length === 0) {
   console.warn("  tailwind: no class literals compiled — is the app unstyled?");
 }
 const generatedPath = join(ROOT, "framework/src/styles.generated.ts");
-const generatedStyles = generateStylesModule(styles);
-// Keep the ignored mirror for docs/site tooling and human inspection. Pass 2
-// receives this build's source directly through jsxPlugin, so concurrent
-// targets can never import another build's transient STYLE_IDS table.
-await Bun.write(generatedPath, generatedStyles);
-console.log(
-  `  tailwind: ${styles.records.length} style record(s), ${styles.anims.length} baked timeline(s), ` +
-    `${Object.keys(styles.ids).length} literal(s) -> framework/src/styles.generated.ts`,
-);
 
 const atlases = await bakeAtlases({
   codepoints,
@@ -308,6 +299,17 @@ for (const a of atlases) {
       `cell ${a.cellW}x${a.cellH}, coverage ${a.coverageW}x${a.coverageH} @${a.rasterDensity}x, ${a.bytes.length} bytes`,
   );
 }
+
+const fontLineHeights = Object.fromEntries(atlases.map((atlas) => [atlas.slot, atlas.lineHeight]));
+const generatedStyles = generateStylesModule(styles, fontLineHeights);
+// Keep the ignored mirror for docs/site tooling and human inspection. Pass 2
+// receives this build's source directly through jsxPlugin, so concurrent
+// targets can never import another build's transient STYLE_IDS table.
+await Bun.write(generatedPath, generatedStyles);
+console.log(
+  `  tailwind: ${styles.records.length} style record(s), ${styles.anims.length} baked timeline(s), ` +
+    `${Object.keys(styles.ids).length} literal(s) -> framework/src/styles.generated.ts`,
+);
 
 // demo images: any collected literal ending .png/.svg is a candidate asset name
 const blobs: PakBlob[] = [

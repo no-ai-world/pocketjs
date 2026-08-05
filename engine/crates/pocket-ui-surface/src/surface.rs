@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 use anyhow::Result;
 use pocket_mod::Guest;
-use pocket_mod::qjs::{Coerced, Function, Object, TypedArray};
+use pocket_mod::qjs::{Coerced, Ctx, Function, Object, TypedArray};
 use pocketjs_core::Ui;
 
 use crate::dbg::DbgMailbox;
@@ -53,6 +53,128 @@ struct Inner {
     /// not match their target (framework/src/host.ts assertNativeHostContract).
     host_id: String,
     host_abi: Option<u32>,
+}
+
+fn node_text_layout_object<'js>(
+    ctx: Ctx<'js>,
+    ui: &Rc<RefCell<Inner>>,
+    id: i32,
+) -> pocket_mod::qjs::Result<Option<Object<'js>>> {
+    // 将原生文字布局转换为 JS 对象。
+    let values = {
+        let mut inner = ui.borrow_mut();
+        if inner.ui.node_text_layout(id) == 0 {
+            return Ok(None);
+        }
+        (
+            inner.ui.node_text_width(),
+            inner.ui.node_text_font_slot(),
+            inner.ui.node_text_align(),
+            inner.ui.node_text_tracking(),
+            inner.ui.node_text_line_height(),
+        )
+    };
+    let object = Object::new(ctx)?;
+    object.set("width", values.0)?;
+    object.set("fontSlot", values.1)?;
+    object.set("textAlign", values.2)?;
+    object.set("tracking", values.3)?;
+    object.set("lineHeight", values.4)?;
+    Ok(Some(object))
+}
+
+fn node_text_layout_function<'js>(
+    ctx: Ctx<'js>,
+    ui: Rc<RefCell<Inner>>,
+) -> pocket_mod::qjs::Result<Function<'js>> {
+    // 创建文字布局读取函数。
+    Function::new(ctx, move |call_ctx: Ctx<'js>, id: i32| {
+        node_text_layout_object(call_ctx, &ui, id)
+    })
+}
+
+fn node_screen_rect_object<'js>(
+    ctx: Ctx<'js>,
+    ui: &Rc<RefCell<Inner>>,
+    id: i32,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> pocket_mod::qjs::Result<Option<Object<'js>>> {
+    // 将通用屏幕矩形转换为 JS 对象。
+    let values = {
+        let mut inner = ui.borrow_mut();
+        if inner.ui.node_screen_rect_stage(id, x as f32, y as f32, width as f32, height as f32) == 0 {
+            return Ok(None);
+        }
+        (
+            inner.ui.node_screen_rect_x(),
+            inner.ui.node_screen_rect_y(),
+            inner.ui.node_screen_rect_w(),
+            inner.ui.node_screen_rect_h(),
+        )
+    };
+    let object = Object::new(ctx)?;
+    object.set("x", values.0)?;
+    object.set("y", values.1)?;
+    object.set("width", values.2)?;
+    object.set("height", values.3)?;
+    Ok(Some(object))
+}
+
+fn node_screen_rect_function<'js>(
+    ctx: Ctx<'js>,
+    ui: Rc<RefCell<Inner>>,
+) -> pocket_mod::qjs::Result<Function<'js>> {
+    // 创建通用屏幕矩形读取函数。
+    Function::new(ctx, move |call_ctx: Ctx<'js>, id: i32, x: f64, y: f64, w: f64, h: f64| {
+        node_screen_rect_object(call_ctx, &ui, id, x, y, w, h)
+    })
+}
+
+fn node_text_selection_rect_object<'js>(
+    ctx: Ctx<'js>,
+    ui: &Rc<RefCell<Inner>>,
+    id: i32,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> pocket_mod::qjs::Result<Option<Object<'js>>> {
+    // 将原生文字选区矩形转换为 JS 对象。
+    let values = {
+        let mut inner = ui.borrow_mut();
+        if inner
+            .ui
+            .node_text_selection_rect_stage(id, x as f32, y as f32, width as f32, height as f32)
+            == 0
+        {
+            return Ok(None);
+        }
+        (
+            inner.ui.node_screen_rect_x(),
+            inner.ui.node_screen_rect_y(),
+            inner.ui.node_screen_rect_w(),
+            inner.ui.node_screen_rect_h(),
+        )
+    };
+    let object = Object::new(ctx)?;
+    object.set("x", values.0)?;
+    object.set("y", values.1)?;
+    object.set("width", values.2)?;
+    object.set("height", values.3)?;
+    Ok(Some(object))
+}
+
+fn node_text_selection_rect_function<'js>(
+    ctx: Ctx<'js>,
+    ui: Rc<RefCell<Inner>>,
+) -> pocket_mod::qjs::Result<Function<'js>> {
+    // 创建文字选区读取函数。
+    Function::new(ctx, move |call_ctx: Ctx<'js>, id: i32, x: f64, y: f64, w: f64, h: f64| {
+        node_text_selection_rect_object(call_ctx, &ui, id, x, y, w, h)
+    })
 }
 
 /// The `ui` surface. Clone-cheap handle; single-threaded like the guest.
@@ -359,6 +481,47 @@ impl UiSurface {
             let ui = self.inner.clone();
             op!("nodeLocalY", move || ui.borrow().ui.node_local_y());
 
+            ns.set(
+                "nodeTextLayout",
+                node_text_layout_function(ctx.clone(), self.inner.clone())?,
+            )?;
+
+            let ui = self.inner.clone();
+            op!("nodeTextWidth", move || ui.borrow().ui.node_text_width());
+
+            let ui = self.inner.clone();
+            op!("nodeTextFontSlot", move || ui.borrow().ui.node_text_font_slot());
+
+            let ui = self.inner.clone();
+            op!("nodeTextAlign", move || ui.borrow().ui.node_text_align());
+
+            let ui = self.inner.clone();
+            op!("nodeTextTracking", move || ui.borrow().ui.node_text_tracking());
+
+            let ui = self.inner.clone();
+            op!("nodeTextLineHeight", move || ui.borrow().ui.node_text_line_height());
+
+            ns.set(
+                "nodeScreenRect",
+                node_screen_rect_function(ctx.clone(), self.inner.clone())?,
+            )?;
+            ns.set(
+                "nodeTextSelectionRect",
+                node_text_selection_rect_function(ctx.clone(), self.inner.clone())?,
+            )?;
+
+            let ui = self.inner.clone();
+            op!("nodeScreenRectX", move || ui.borrow().ui.node_screen_rect_x());
+
+            let ui = self.inner.clone();
+            op!("nodeScreenRectY", move || ui.borrow().ui.node_screen_rect_y());
+
+            let ui = self.inner.clone();
+            op!("nodeScreenRectW", move || ui.borrow().ui.node_screen_rect_w());
+
+            let ui = self.inner.clone();
+            op!("nodeScreenRectH", move || ui.borrow().ui.node_screen_rect_h());
+
             let ui = self.inner.clone();
             op!("setCursor", move |tex: i32, hot_x: f64, hot_y: f64, w: f64, h: f64| {
                 ui.borrow_mut().ui.set_cursor(tex, hot_x as f32, hot_y as f32, w as f32, h as f32)
@@ -549,6 +712,25 @@ fn decode_pix_header(blob: &[u8], pixels_off: usize) -> Option<(u32, u32, u32, &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geometry_ops_return_host_objects() {
+        let guest = Guest::new().unwrap();
+        let surface = UiSurface::new((16.0, 16.0));
+        surface.mount(&guest).unwrap();
+        guest
+            .eval(
+                "geometry",
+                "globalThis.rect = ui.nodeScreenRect(1, 1, 2, 3, 4);",
+            )
+            .unwrap();
+        let (x, width): (f64, f64) = guest.with(|ctx| {
+            let rect: Object = ctx.globals().get("rect").unwrap();
+            (rect.get("x").unwrap(), rect.get("width").unwrap())
+        });
+        assert_eq!(x, 1.0);
+        assert_eq!(width, 3.0);
+    }
 
     #[test]
     fn empty_service_allowlist_disables_the_companion() {

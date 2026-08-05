@@ -39,11 +39,16 @@ import {
   type NodeMirror,
 } from "./renderer.ts";
 import { setOverlayRoot } from "./overlay.ts";
+import { reconcileTextSelection } from "./text-selection.ts";
 import { registerStyles, resolveStyle } from "./styles.ts";
 import { handleFrame, setHitRoot, setInputRoot } from "./input.ts";
 import { __setAnalog, resetFrameHooks, runFrameHooks } from "./frame.ts";
 import { __resetTouches, __setTouches } from "./touch.ts";
-import { resetHostInputBuffer } from "./host-input.ts";
+import {
+  clearSelectableTextSelection,
+  resetHostInputBuffer,
+  runHostInputPump,
+} from "./host-input.ts";
 import { __advanceClock, resetClock } from "./clock.ts";
 import { __drainEffects, resetEffects } from "./effects.ts";
 import { entries as pakEntries, get as pakGet, hasPack, loadPack } from "./pak.ts";
@@ -262,7 +267,9 @@ export function render(code: () => unknown, opts: RenderOptions = {}): () => voi
       __setAnalog(analog); // latch the nub before any app code reads it
       __setTouches(touches); // latch logical front-panel contacts for this frame
       __drainEffects(); // frame-boundary deliveries enter the world first
+      runHostInputPump(); // host input is always observed before app callbacks
       runFrameHooks(buttons); // app lifecycle callbacks: onFrame/onButtonPress/etc.
+      reconcileTextSelection();
       handleFrame(buttons); // edge-detect, focus nav, onPress (runs effects)
       runSweep(); // then destroy subtrees still detached [R]
     }),
@@ -273,6 +280,7 @@ export function render(code: () => unknown, opts: RenderOptions = {}): () => voi
   return () => {
     removeResizeViewportHook();
     __resetTouches();
+    clearSelectableTextSelection();
     dispose(); // tears down reactivity only — universal keeps the nodes
     setInputRoot(null); // drops focus state (native focus dies with the nodes)
     setHitRoot(null);

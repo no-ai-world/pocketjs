@@ -217,6 +217,67 @@ pub extern "C" fn ui_node_local_y() -> f32 {
 }
 
 #[no_mangle]
+pub extern "C" fn ui_node_text_layout(id: i32) -> i32 {
+    ui().node_text_layout(id)
+}
+
+#[no_mangle]
+pub extern "C" fn ui_node_text_width() -> f32 {
+    ui().node_text_width()
+}
+
+#[no_mangle]
+pub extern "C" fn ui_node_text_font_slot() -> f32 {
+    ui().node_text_font_slot()
+}
+
+#[no_mangle]
+pub extern "C" fn ui_node_text_align() -> f32 {
+    ui().node_text_align()
+}
+
+#[no_mangle]
+pub extern "C" fn ui_node_text_tracking() -> f32 {
+    ui().node_text_tracking()
+}
+
+#[no_mangle]
+pub extern "C" fn ui_node_text_line_height() -> f32 {
+    ui().node_text_line_height()
+}
+
+#[no_mangle]
+pub extern "C" fn ui_node_screen_rect(id: i32, x: f32, y: f32, w: f32, h: f32) -> i32 {
+    ui().node_screen_rect_stage(id, x, y, w, h)
+}
+
+#[no_mangle]
+pub extern "C" fn ui_node_text_selection_rect(id: i32, x: f32, y: f32, w: f32, h: f32) -> i32 {
+    // 暴露文字选区矩形的成功标志。
+    ui().node_text_selection_rect_stage(id, x, y, w, h)
+}
+
+#[no_mangle]
+pub extern "C" fn ui_node_screen_rect_x() -> f32 {
+    ui().node_screen_rect_x()
+}
+
+#[no_mangle]
+pub extern "C" fn ui_node_screen_rect_y() -> f32 {
+    ui().node_screen_rect_y()
+}
+
+#[no_mangle]
+pub extern "C" fn ui_node_screen_rect_w() -> f32 {
+    ui().node_screen_rect_w()
+}
+
+#[no_mangle]
+pub extern "C" fn ui_node_screen_rect_h() -> f32 {
+    ui().node_screen_rect_h()
+}
+
+#[no_mangle]
 pub extern "C" fn ui_set_cursor(tex: i32, hot_x: f32, hot_y: f32, w: f32, h: f32) {
     ui().set_cursor(tex, hot_x, hot_y, w, h)
 }

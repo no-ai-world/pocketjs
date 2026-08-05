@@ -214,6 +214,16 @@ struct TimelineInst {
     loop_frames: u16,
 }
 
+/// Native text values needed by framework pointer mapping.
+#[derive(Clone, Copy)]
+struct NodeTextLayout {
+    width: f32,
+    font_slot: u32,
+    text_align: u8,
+    tracking: f32,
+    line_height: f32,
+}
+
 /// The retained UI core. One per host/screen.
 pub struct Ui {
     tree: tree::Tree,
@@ -259,6 +269,10 @@ pub struct Ui {
     /// `ui_node_local_x/y` readbacks. `None` when the last call was stale or
     /// non-invertible.
     last_local_point: Option<(f32, f32)>,
+    /// Last node-local rectangle mapped into screen space.
+    last_screen_rect: Option<(f32, f32, f32, f32)>,
+    /// Last resolved text layout staged for host readbacks.
+    last_text_layout: Option<NodeTextLayout>,
     paused: bool,
     step_pending: bool,
 }
@@ -307,6 +321,8 @@ impl Ui {
             inspect_rect: None,
             inspect_drawn: None,
             last_local_point: None,
+            last_screen_rect: None,
+            last_text_layout: None,
             paused: false,
             step_pending: false,
         }
@@ -842,7 +858,14 @@ impl Ui {
         if self.layout.needs() {
             layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
         }
-        draw::hit_test(&self.tree, &self.styles, self.layout.viewport, x, y)
+        draw::hit_test(
+            &self.tree,
+            &self.styles,
+            &self.fonts,
+            self.layout.viewport,
+            x,
+            y,
+        )
     }
 
     /// Screen point → local point relative to node `id`'s border box.
@@ -876,7 +899,88 @@ impl Ui {
         if self.layout.needs() {
             layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
         }
-        draw::node_screen_rect(&self.tree, &self.styles, id, x, y, w, h)
+        let rect = draw::node_screen_rect(&self.tree, &self.styles, id, x, y, w, h);
+        self.last_screen_rect = rect;
+        rect
+    }
+
+    /// Stage a text selection span using native glyph-cell geometry.
+    pub fn node_text_selection_rect(
+        &mut self,
+        id: i32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Option<(f32, f32, f32, f32)> {
+        // 计算文字选区的屏幕矩形。
+        if self.layout.needs() {
+            layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
+        }
+        let rect = draw::node_text_selection_rect(
+            &self.tree,
+            &self.styles,
+            &self.fonts,
+            self.layout.viewport,
+            id,
+            x,
+            y,
+            w,
+            h,
+        );
+        self.last_screen_rect = rect;
+        rect
+    }
+
+    /// Stage a node-local rectangle for the host readback surface.
+    pub fn node_screen_rect_stage(&mut self, id: i32, x: f32, y: f32, w: f32, h: f32) -> i32 {
+        self.node_screen_rect(id, x, y, w, h).is_some() as i32
+    }
+
+    /// Stage a text selection span for the host readback surface.
+    pub fn node_text_selection_rect_stage(
+        &mut self,
+        id: i32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> i32 {
+        // 暴露文字选区矩形的成功标志。
+        self.node_text_selection_rect(id, x, y, w, h).is_some() as i32
+    }
+
+    /// Resolve the native text layout values used by framework selection.
+    pub fn node_text_layout(&mut self, id: i32) -> i32 {
+        if self.layout.needs() {
+            layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
+        }
+        let Some(node) = self.tree.get(id) else {
+            self.last_text_layout = None;
+            return 0;
+        };
+        if node.node_type != spec::NodeType::Text as u8 {
+            self.last_text_layout = None;
+            return 0;
+        }
+        let resolved = style::resolve(node, &self.styles, true);
+        let Some(atlas) = self.fonts.atlas(resolved.font_slot as u8) else {
+            self.last_text_layout = None;
+            return 0;
+        };
+        let line_height = if resolved.line_height.is_nan() {
+            atlas.line_height as f32
+        } else {
+            resolved.line_height
+        };
+        self.last_text_layout = Some(NodeTextLayout {
+            width: node.layout.w,
+            font_slot: resolved.font_slot,
+            text_align: resolved.text_align,
+            tracking: resolved.tracking,
+            line_height,
+        });
+        1
     }
 
     /// Last `node_local_point` local x (0.0 when the last call was invalid).
@@ -887,6 +991,61 @@ impl Ui {
     /// Last `node_local_point` local y (0.0 when the last call was invalid).
     pub fn node_local_y(&self) -> f32 {
         self.last_local_point.map(|(_, y)| y).unwrap_or(0.0)
+    }
+
+    /// Read the staged screen rectangle x coordinate.
+    pub fn node_screen_rect_x(&self) -> f32 {
+        self.last_screen_rect.map(|(x, _, _, _)| x).unwrap_or(0.0)
+    }
+
+    /// Read the staged screen rectangle y coordinate.
+    pub fn node_screen_rect_y(&self) -> f32 {
+        self.last_screen_rect.map(|(_, y, _, _)| y).unwrap_or(0.0)
+    }
+
+    /// Read the staged screen rectangle width.
+    pub fn node_screen_rect_w(&self) -> f32 {
+        self.last_screen_rect.map(|(_, _, w, _)| w).unwrap_or(0.0)
+    }
+
+    /// Read the staged screen rectangle height.
+    pub fn node_screen_rect_h(&self) -> f32 {
+        self.last_screen_rect.map(|(_, _, _, h)| h).unwrap_or(0.0)
+    }
+
+    /// Read the staged native text layout width.
+    pub fn node_text_width(&self) -> f32 {
+        self.last_text_layout
+            .map(|layout| layout.width)
+            .unwrap_or(0.0)
+    }
+
+    /// Read the staged native text font slot.
+    pub fn node_text_font_slot(&self) -> f32 {
+        self.last_text_layout
+            .map(|layout| layout.font_slot as f32)
+            .unwrap_or(0.0)
+    }
+
+    /// Read the staged native text alignment.
+    pub fn node_text_align(&self) -> f32 {
+        self.last_text_layout
+            .map(|layout| layout.text_align as f32)
+            .unwrap_or(0.0)
+    }
+
+    /// Read the staged native text tracking.
+    pub fn node_text_tracking(&self) -> f32 {
+        self.last_text_layout
+            .map(|layout| layout.tracking)
+            .unwrap_or(0.0)
+    }
+
+    /// Read the staged native text line height.
+    pub fn node_text_line_height(&self) -> f32 {
+        self.last_text_layout
+            .map(|layout| layout.line_height)
+            .unwrap_or(0.0)
     }
 
     /// Bind the virtual cursor sprite (spec op setCursor): an uploaded

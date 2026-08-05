@@ -36,6 +36,8 @@ export interface NodeMirror {
   onPress?: (() => void) | undefined;
   /** DevTools semantic name (`debugName` prop / <Named> wrapper). */
   debugName?: string;
+  /** Framework-only hit-test redirection for non-interactive overlays. */
+  hitTarget?: NodeMirror;
 }
 
 // DevTools (docs/DEVTOOLS.md): one nullable hook, pinged on any structural or

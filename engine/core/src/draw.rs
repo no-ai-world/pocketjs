@@ -20,13 +20,14 @@
 //!   - opacity multiplies vertex alpha down the subtree (wrong on overlap,
 //!     per docs/DESIGN.md punt list).
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::layout::{floorf, roundf};
 use crate::spec;
 use crate::style::{self, StyleTable, NO_GRADIENT};
 use crate::text::Fonts;
-use crate::tree::Tree;
+use crate::tree::{Node, Tree};
 
 /// The core -> backend command list: flat little-endian u32 words.
 /// Format pinned in contracts/spec/spec.ts ("DRAWLIST op format"); op codes in
@@ -281,6 +282,19 @@ fn glyph_word(gid: u16, x_residual: f32, y_residual: f32) -> u32 {
     gid as u32
         | (glyph_residual_q7(x_residual) as u32) << 16
         | (glyph_residual_q7(y_residual) as u32) << 24
+}
+
+/// The cell origin the renderer actually paints: the rounded anchor plus the
+/// same Q7 residual `emit_text` packs into the glyph word. Hit testing and
+/// selection geometry must use this reconstructed anchor, not the raw rounded
+/// point, or they drift up to half a logical pixel from the painted ink.
+#[inline]
+fn glyph_cell_origin(x: f32, y: f32) -> (f32, f32) {
+    let (rx, ry) = (roundf(x), roundf(y));
+    (
+        rx + glyph_residual_q7(x - rx) as i8 as f32 / 128.0,
+        ry + glyph_residual_q7(y - ry) as i8 as f32 / 128.0,
+    )
 }
 
 #[inline]
@@ -564,6 +578,47 @@ fn local_affine(l: &crate::tree::LayoutRect, r: &style::Resolved) -> Affine {
     local
 }
 
+/// Resolve one node's local 3D transform.
+fn local_3d(l: &crate::tree::LayoutRect, r: &style::Resolved) -> Mat34 {
+    // 组合节点的三维局部变换。
+    let (ox, oy) = (l.w * (0.5 + r.origin_x), l.h * (0.5 + r.origin_y));
+    let mut local = Mat34::translate(l.x + r.translate_x, l.y + r.translate_y, r.translate_z)
+        .then(&Mat34::translate(ox, oy, 0.0));
+    if r.rotate != 0.0 {
+        local = local.then(&Mat34::rot_z(r.rotate));
+    }
+    if r.rotate_x != 0.0 {
+        local = local.then(&Mat34::rot_x(r.rotate_x));
+    }
+    if r.rotate_y != 0.0 {
+        local = local.then(&Mat34::rot_y(r.rotate_y));
+    }
+    let (sx, sy) = (r.scale * r.scale_x, r.scale * r.scale_y);
+    if sx != 1.0 || sy != 1.0 {
+        local = local.then(&Mat34::scale(sx, sy));
+    }
+    local.then(&Mat34::translate(-ox, -oy, 0.0))
+}
+
+/// Project one point through a perspective context.
+fn project_3d_point(
+    matrix: &Mat34,
+    root_world: &Affine,
+    distance: f32,
+    center_x: f32,
+    center_y: f32,
+    x: f32,
+    y: f32,
+) -> ((f32, f32), f32) {
+    // 投影三维上下文中的一个点。
+    let (px, py, pz) = matrix.apply(x, y, 0.0);
+    let denom = (distance - pz).max(1.0);
+    let factor = distance / denom;
+    let local_x = center_x + (px - center_x) * factor;
+    let local_y = center_y + (py - center_y) * factor;
+    (root_world.apply(local_x, local_y), pz)
+}
+
 /// AABB (intersected with the screen) of a local rect under `world` —
 /// conservative integer bounds: floor mins, ceil maxes.
 fn world_aabb_of(screen: (f32, f32), world: &Affine, w: f32, h: f32) -> Clip {
@@ -660,42 +715,259 @@ fn for_children_in_paint_order(
 /// hit result must not flip with the focus state it itself produces (no
 /// hysteresis). A focusable with no paint in ANY variant gives no visual
 /// feedback either — give it a bg (any alpha > 0) to make it a hit target.
-/// Rounded/arc shapes claim their full box (corner approximation).
+/// Test whether a point lies inside an axis-aligned rounded rectangle.
+fn rounded_rect_contains(
+    px: f32,
+    py: f32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    radius: f32,
+) -> bool {
+    if px < x0 || px >= x1 || py < y0 || py >= y1 {
+        return false;
+    }
+    let r = radius.min((x1 - x0) * 0.5).min((y1 - y0) * 0.5);
+    if r <= 0.0 {
+        return true;
+    }
+    let (cx, cy) = if px < x0 + r {
+        if py < y0 + r {
+            (x0 + r, y0 + r)
+        } else if py >= y1 - r {
+            (x0 + r, y1 - r)
+        } else {
+            return true;
+        }
+    } else if px >= x1 - r {
+        if py < y0 + r {
+            (x1 - r, y0 + r)
+        } else if py >= y1 - r {
+            (x1 - r, y1 - r)
+        } else {
+            return true;
+        }
+    } else {
+        return true;
+    };
+    let dx = px - cx;
+    let dy = py - cy;
+    dx * dx + dy * dy <= r * r
+}
+
+/// Precomputed annular-sector geometry shared by paint and hit testing.
+#[derive(Clone, Copy)]
+struct ArcGeometry {
+    center_x: f32,
+    center_y: f32,
+    rmid: f32,
+    half: f32,
+    ring_in2: f32,
+    ring_out2: f32,
+    half2: f32,
+    start_x: f32,
+    start_y: f32,
+    end_x: f32,
+    end_y: f32,
+    cap0_x: f32,
+    cap0_y: f32,
+    cap1_x: f32,
+    cap1_y: f32,
+    full: bool,
+    major: bool,
+}
+
+impl ArcGeometry {
+    fn new(
+        center_x: f32,
+        center_y: f32,
+        outer: f32,
+        width: f32,
+        start: f32,
+        sweep: f32,
+    ) -> Option<Self> {
+        // 预计算一次弧线的环带、角度和圆帽几何。
+        if outer <= 0.0 || width <= 0.0 {
+            return None;
+        }
+        let rmid = outer - width * 0.5;
+        let half = width * 0.5;
+        let ring_in = (rmid - half).max(0.0);
+        let sweep = clampf(sweep, -360.0, 360.0);
+        let (start, sweep) = if sweep < 0.0 { (start + sweep, -sweep) } else { (start, sweep) };
+        let direction = |degrees: f32| {
+            let radians = degrees * (PI / 180.0);
+            (sinf(radians), -cosf(radians))
+        };
+        let (start_x, start_y) = direction(start);
+        let (end_x, end_y) = direction(start + sweep);
+        Some(Self {
+            center_x,
+            center_y,
+            rmid,
+            half,
+            ring_in2: ring_in * ring_in,
+            ring_out2: (rmid + half) * (rmid + half),
+            half2: half * half,
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            cap0_x: center_x + start_x * rmid,
+            cap0_y: center_y + start_y * rmid,
+            cap1_x: center_x + end_x * rmid,
+            cap1_y: center_y + end_y * rmid,
+            full: sweep >= 360.0,
+            major: sweep > 180.0,
+        })
+    }
+
+    fn contains(self, px: f32, py: f32) -> bool {
+        // 判断点是否落在弧线或其圆帽内。
+        let dx = px - self.center_x;
+        let dy = py - self.center_y;
+        let d2 = dx * dx + dy * dy;
+        if d2 >= self.ring_in2 && d2 <= self.ring_out2 {
+            let cross_start = self.start_x * dy - self.start_y * dx;
+            let cross_end = self.end_x * dy - self.end_y * dx;
+            let in_angle = self.full || if self.major {
+                cross_start >= 0.0 || cross_end <= 0.0
+            } else {
+                cross_start >= 0.0 && cross_end <= 0.0
+            };
+            if in_angle {
+                return true;
+            }
+        }
+        if self.full {
+            return false;
+        }
+        let cap0_x = px - self.cap0_x;
+        let cap0_y = py - self.cap0_y;
+        let cap1_x = px - self.cap1_x;
+        let cap1_y = py - self.cap1_y;
+        cap0_x * cap0_x + cap0_y * cap0_y <= self.half2 ||
+            cap1_x * cap1_x + cap1_y * cap1_y <= self.half2
+    }
+}
+
+/// Match hit ownership to the pixels emitted by one 2D node.
 #[allow(clippy::too_many_arguments)]
 fn claims_hit(
     node: &crate::tree::Node,
     r: &style::Resolved,
     styles: &StyleTable,
+    opacity: f32,
+    world: &Affine,
     lx: f32,
     ly: f32,
     w: f32,
     h: f32,
 ) -> bool {
-    if node.node_type == spec::NodeType::Text as u8 {
-        return true; // the glyph run
-    }
     if node.node_type == spec::NodeType::Image as u8 && node.tex >= 0 {
         return true;
     }
-    if alpha(r.bg_color) > 0
-        || (r.grad_dir != NO_GRADIENT && r.grad_dir <= spec::GradDir::ToRight as u32)
+    let has_gradient = r.grad_dir != NO_GRADIENT && r.grad_dir <= spec::GradDir::ToRight as u32;
+    let is_arc = r.arc_width > 0.0 && r.arc_sweep != 0.0;
+    let arc_drawable = world.is_axis_aligned() && world.d > 0.0;
+    let fill_is_visible = if is_arc {
+        let (center_x, center_y) = world.apply(w * 0.5, h * 0.5);
+        let scale = world.d.max(0.0);
+        let outer = (w.min(h) * 0.5) * scale;
+        let width = (r.arc_width * scale).min(outer);
+        let (px, py) = world.apply(lx, ly);
+        alpha(scale_alpha(r.bg_color, opacity)) > 0 &&
+            arc_drawable &&
+            ArcGeometry::new(center_x, center_y, outer, width, r.arc_start, r.arc_sweep)
+                .is_some_and(|arc| arc.contains(px, py))
+    } else if has_gradient {
+        alpha(scale_alpha(r.grad_from, opacity)) > 0 ||
+            alpha(scale_alpha(r.grad_to, opacity)) > 0
+    } else {
+        alpha(scale_alpha(r.bg_color, opacity)) > 0
+    };
+    let shadow_is_visible = r.shadow > 0 &&
+        (has_gradient || alpha(scale_alpha(r.bg_color, opacity)) > 0);
+    if fill_is_visible
+        || shadow_is_visible
         || styles
             .record(node.style_id)
             .is_some_and(|rec| !rec.focus.is_empty() || !rec.active.is_empty())
     {
         return true;
     }
-    // Border/bevel-only ink: claim the edge band it actually paints.
-    let mut band = 0.0f32;
-    if r.border_width > 0.0 && alpha(r.border_color) > 0 {
-        band = band.max(r.border_width);
+    // Border/bevel-only ink: claim the edge geometry it actually paints.
+    if r.border_width > 0.0 && alpha(scale_alpha(r.border_color, opacity)) > 0 {
+        if r.radius <= 0.0 || !world.is_axis_aligned() || world.d <= 0.0 {
+            let band = r.border_width;
+            if lx < band || ly < band || lx >= w - band || ly >= h - band {
+                return true;
+            }
+        } else {
+            let (sx0, sy0) = world.apply(0.0, 0.0);
+            let (sx1, sy1) = world.apply(w, h);
+            if sx1 > sx0 && sy1 > sy0 {
+                let scale_y = world.d;
+                let border = (r.border_width * scale_y)
+                    .min((sx1 - sx0) * 0.5)
+                    .min((sy1 - sy0) * 0.5);
+                let radius = (r.radius * scale_y)
+                    .min((sx1 - sx0) * 0.5)
+                    .min((sy1 - sy0) * 0.5);
+                if border > 0.0 && radius > 0.5 {
+                    let (px, py) = world.apply(lx, ly);
+                    let outer = rounded_rect_contains(px, py, sx0, sy0, sx1, sy1, radius);
+                    let inner = rounded_rect_contains(
+                        px,
+                        py,
+                        sx0 + border,
+                        sy0 + border,
+                        sx1 - border,
+                        sy1 - border,
+                        (radius - border).max(0.0),
+                    );
+                    if outer && !inner {
+                        return true;
+                    }
+                } else {
+                    let band = r.border_width;
+                    if lx < band || ly < band || lx >= w - band || ly >= h - band {
+                        return true;
+                    }
+                }
+            }
+        }
     }
-    if (r.bevel_outer_light | r.bevel_outer_dark | r.bevel_inner_light | r.bevel_inner_dark) != 0
-        && r.bevel_width > 0.0
-    {
-        band = band.max(r.bevel_width * 2.0); // two nested rings
+    if r.bevel_width <= 0.0 || r.radius > 0.0 || is_arc {
+        return false;
     }
-    band > 0.0 && (lx < band || ly < band || lx >= w - band || ly >= h - band)
+    let bvw = r.bevel_width;
+    let rings = [
+        (0.0, r.bevel_outer_light, r.bevel_outer_dark),
+        (bvw, r.bevel_inner_light, r.bevel_inner_dark),
+    ];
+    for (inset, light, dark) in rings {
+        let x0 = inset;
+        let y0 = inset;
+        let x1 = w - inset;
+        let y1 = h - inset;
+        if x1 - x0 < bvw * 2.0 || y1 - y0 < bvw * 2.0 {
+            continue;
+        }
+        let hit_band = bvw;
+        let top = lx >= x0 && lx < x1 && ly >= y0 && ly <= (y0 + hit_band).min(y1);
+        let left = lx >= x0 && lx <= (x0 + hit_band).min(x1) && ly >= y0 && ly < y1;
+        let bottom = lx >= x0 && lx < x1 && ly >= (y1 - hit_band).max(y0) && ly < y1;
+        let right = lx >= (x1 - hit_band).max(x0) && lx < x1 && ly >= y0 && ly < y1;
+        if alpha(scale_alpha(light, opacity)) > 0 && (top || left) {
+            return true;
+        }
+        if alpha(scale_alpha(dark, opacity)) > 0 && (bottom || right) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Topmost node at a logical point (spec op hitTest) — paint-order hit
@@ -706,21 +978,40 @@ fn claims_hit(
 /// subtrees are skipped, and so are subtrees at effective opacity 0 —
 /// paint culls them entirely, and what cannot be seen must not eat hits (a
 /// faded-out-but-mounted toast). Partially transparent nodes still claim.
-/// `overflow-hidden` clips descendants. A perspective (3D) subtree hits as
-/// its context root's border box — only the 2D walk composes a world affine
-/// per node (the DevTools inspector shares this limit), and swallowing the
-/// hit beats clicking whatever sits BEHIND visible 3D content.
+/// `overflow-hidden` clips descendants. A perspective (3D) subtree uses its
+/// context root as the fallback hit, while projected text children can claim
+/// their visible upright boxes; swallowing the hit beats clicking whatever
+/// sits BEHIND visible 3D content.
 /// Returns the generation-tagged id, or 0.
-pub fn hit_test(tree: &Tree, styles: &StyleTable, screen: (f32, f32), x: f32, y: f32) -> i32 {
+pub fn hit_test(
+    tree: &Tree,
+    styles: &StyleTable,
+    fonts: &Fonts,
+    screen: (f32, f32),
+    x: f32,
+    y: f32,
+) -> i32 {
     let root_slot = crate::tree::split_id(spec::ROOT_ID).1;
     let mut hit = 0i32;
-    hit_walk(tree, styles, screen, root_slot, Affine::IDENTITY, 1.0, Clip::viewport(screen), x, y, &mut hit);
+    hit_walk(
+        tree,
+        styles,
+        fonts,
+        screen,
+        root_slot,
+        Affine::IDENTITY,
+        1.0,
+        Clip::viewport(screen),
+        x,
+        y,
+        &mut hit,
+    );
     hit
 }
 
-/// Resolve the 2D world transform for a live node.
-fn node_world_affine(tree: &Tree, styles: &StyleTable, id: i32) -> Option<Affine> {
-    // Build the live root-to-node path once for all coordinate conversions.
+/// Resolve a live node's root-to-node slot path.
+fn node_path(tree: &Tree, id: i32) -> Option<Vec<u32>> {
+    // 收集有效节点的根到节点路径。
     let mut path: Vec<u32> = Vec::new();
     let mut cur = id;
     let mut reached_root = false;
@@ -741,6 +1032,13 @@ fn node_world_affine(tree: &Tree, styles: &StyleTable, id: i32) -> Option<Affine
         return None;
     }
     path.reverse();
+    Some(path)
+}
+
+/// Resolve the 2D world transform for a live node.
+fn node_world_affine(tree: &Tree, styles: &StyleTable, id: i32) -> Option<Affine> {
+    // 组合节点的二维世界变换。
+    let path = node_path(tree, id)?;
     let mut world = Affine::IDENTITY;
     for slot in path {
         let node = &tree.slots[slot as usize];
@@ -751,6 +1049,213 @@ fn node_world_affine(tree: &Tree, styles: &StyleTable, id: i32) -> Option<Affine
         world = world.then(&local_affine(&node.layout, &r));
     }
     Some(world)
+}
+
+/// Resolve a text node's 2D or perspective selection transform.
+fn node_text_selection_transform(
+    tree: &Tree,
+    styles: &StyleTable,
+    screen: (f32, f32),
+    id: i32,
+) -> Option<(Affine, Clip, f32)> {
+    // 解析文字选区使用的二维或透视投影变换。
+    let path = node_path(tree, id)?;
+    let path_len = path.len();
+    let mut world = Affine::IDENTITY;
+    let mut clip = Clip::viewport(screen);
+    let mut opacity = 1.0;
+    let mut context: Option<(Affine, f32, f32, f32)> = None;
+    let mut matrix = Mat34::IDENTITY;
+
+    for (index, slot) in path.into_iter().enumerate() {
+        let node = &tree.slots[slot as usize];
+        let r = style::resolve(node, styles, true);
+        if r.display == spec::Display::None as u8 {
+            return None;
+        }
+        let op = clampf(opacity * r.opacity, 0.0, 1.0);
+        if op <= 0.0 {
+            return None;
+        }
+        opacity = op;
+        if let Some((_, _, _, _)) = context {
+            matrix = matrix.then(&local_3d(&node.layout, &r));
+            continue;
+        }
+
+        world = world.then(&local_affine(&node.layout, &r));
+        if r.perspective > 0.0 {
+            // A Text context root is painted by the ordinary 2D path before
+            // the perspective branch, so its own perspective is not applied.
+            if index + 1 == path_len && node.node_type == spec::NodeType::Text as u8 {
+                return Some((world, clip, opacity));
+            }
+            if index + 1 < path_len && r.overflow == spec::Overflow::Hidden as u8 {
+                clip = clip.intersect(&world_aabb_of(screen, &world, node.layout.w, node.layout.h));
+                if clip.is_empty() {
+                    return None;
+                }
+            }
+            context = Some((world, r.perspective, node.layout.w * 0.5, node.layout.h * 0.5));
+            continue;
+        }
+        if index + 1 < path_len && r.overflow == spec::Overflow::Hidden as u8 {
+            clip = clip.intersect(&world_aabb_of(screen, &world, node.layout.w, node.layout.h));
+            if clip.is_empty() {
+                return None;
+            }
+        }
+    }
+
+    let Some((root_world, distance, center_x, center_y)) = context else {
+        return Some((world, clip, opacity));
+    };
+    let (origin, _) = project_3d_point(
+        &matrix,
+        &root_world,
+        distance,
+        center_x,
+        center_y,
+        0.0,
+        0.0,
+    );
+    Some((Affine::translate(origin.0, origin.1), clip, opacity))
+}
+
+fn point_in_triangle(point: (f32, f32), a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> bool {
+    // 判断屏幕点是否位于三角形内。
+    let cross = |p: (f32, f32), q: (f32, f32), r: (f32, f32)| {
+        (q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0)
+    };
+    let signs = [cross(a, b, point), cross(b, c, point), cross(c, a, point)];
+    let has_positive = signs.iter().any(|value| *value > 0.0);
+    let has_negative = signs.iter().any(|value| *value < 0.0);
+    (has_positive || has_negative) && !(has_positive && has_negative)
+}
+
+fn point_in_quad(point: (f32, f32), corners: [(f32, f32); 4]) -> bool {
+    // 判断屏幕点是否位于投影四边形内。
+    point_in_triangle(point, corners[0], corners[1], corners[2]) ||
+        point_in_triangle(point, corners[0], corners[2], corners[3])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hit_3d(
+    tree: &Tree,
+    styles: &StyleTable,
+    fonts: &Fonts,
+    screen: (f32, f32),
+    slot: u32,
+    matrix: &Mat34,
+    opacity: f32,
+    root_world: &Affine,
+    distance: f32,
+    center_x: f32,
+    center_y: f32,
+    clip: &Clip,
+    px: f32,
+    py: f32,
+    best: &mut Option<(f32, bool, i32)>,
+) {
+    // 命中透视子树中的最前方可见内容。
+    let node = &tree.slots[slot as usize];
+    let r = style::resolve(node, styles, true);
+    if r.display == spec::Display::None as u8 {
+        return;
+    }
+    let op = opacity * clampf(r.opacity, 0.0, 1.0);
+    if op <= 0.0 {
+        return;
+    }
+    let l = node.layout;
+    let matrix = matrix.then(&local_3d(&l, &r));
+    let project = |x: f32, y: f32| {
+        project_3d_point(&matrix, root_world, distance, center_x, center_y, x, y)
+    };
+    let corners = [
+        project(0.0, 0.0),
+        project(l.w, 0.0),
+        project(l.w, l.h),
+        project(0.0, l.h),
+    ];
+    let projected_corners = [corners[0].0, corners[1].0, corners[2].0, corners[3].0];
+    let covers_point = l.w > 0.0 && l.h > 0.0 && clip.contains(px, py) &&
+        point_in_quad((px, py), projected_corners);
+    let update = |best: &mut Option<(f32, bool, i32)>, depth: f32, text: bool, id: i32| {
+        let replace = match best {
+            Some((best_depth, _, _)) => depth >= *best_depth,
+            None => true,
+        };
+        if replace {
+            *best = Some((depth, text, id));
+        }
+    };
+    let color = if r.grad_dir != NO_GRADIENT && r.grad_dir <= spec::GradDir::ToRight as u32 {
+        lerp_color(r.grad_from, r.grad_to, 0.5)
+    } else {
+        r.bg_color
+    };
+    let color = scale_alpha(color, op);
+    if covers_point && alpha(color) > 0 {
+        let depth = (corners[0].1 + corners[1].1 + corners[2].1 + corners[3].1) * 0.25;
+        update(best, depth, false, node.id(slot));
+    }
+    if covers_point && node.node_type == spec::NodeType::Image as u8 && node.tex >= 0 {
+        let depth = (corners[0].1 + corners[1].1 + corners[2].1 + corners[3].1) * 0.25 + 0.005;
+        update(best, depth, false, node.id(slot));
+    }
+    if node.node_type == spec::NodeType::Text as u8 {
+        let ((sx, sy), depth) = project(0.0, 0.0);
+        let anchor = Affine::translate(sx, sy);
+        let mut glyphs = Vec::new();
+        if collect_visible_text_glyphs(
+            tree,
+            fonts,
+            node,
+            &r,
+            &anchor,
+            op,
+            clip,
+            screen,
+            l.w,
+            &mut glyphs,
+        ) && fonts.atlas(r.font_slot as u8).is_some_and(|atlas| {
+            hit_text_glyph(
+                &glyphs,
+                atlas.cell_w as f32,
+                atlas.cell_h as f32,
+                &anchor,
+                clip,
+                screen,
+                px,
+                py,
+            )
+        }) {
+            update(best, depth + 0.01, true, node.id(slot));
+        }
+        return;
+    }
+    for &cid in &node.children {
+        if let Some(cs) = tree.resolve(cid) {
+            hit_3d(
+                tree,
+                styles,
+                fonts,
+                screen,
+                cs,
+                &matrix,
+                op,
+                root_world,
+                distance,
+                center_x,
+                center_y,
+                clip,
+                px,
+                py,
+                best,
+            );
+        }
+    }
 }
 
 /// Screen point → local point relative to node `id`'s border box.
@@ -770,6 +1275,70 @@ pub fn node_local_point(
     }
     let world = node_world_affine(tree, styles, id)?;
     local_point(&world, px, py)
+}
+
+/// Map a text selection span using the renderer's glyph-cell transform.
+fn text_selection_screen_rect(
+    tree: &Tree,
+    fonts: &Fonts,
+    node: &Node,
+    resolved: &style::Resolved,
+    world: &Affine,
+    opacity: f32,
+    screen: (f32, f32),
+    clip: &Clip,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    // 计算选中文字形单元的屏幕包围盒。
+    let atlas = fonts.atlas(resolved.font_slot as u8)?;
+    let mut glyphs = Vec::new();
+    if !collect_visible_text_glyphs(
+        tree,
+        fonts,
+        node,
+        resolved,
+        world,
+        opacity,
+        clip,
+        screen,
+        node.layout.w,
+        &mut glyphs,
+    ) {
+        return None;
+    }
+    let cell_w = atlas.cell_w as f32;
+    let cell_h = atlas.cell_h as f32;
+    let mut bounds: Option<(f32, f32, f32, f32)> = None;
+    for glyph in glyphs {
+        if glyph.x + cell_w <= x || glyph.x >= x + w || glyph.y + cell_h <= y || glyph.y >= y + h {
+            continue;
+        }
+        let (sx, sy) = world.apply(glyph.x, glyph.y);
+        let (rx, ry) = glyph_cell_origin(sx, sy);
+        let cell = Clip {
+            x0: rx,
+            y0: ry,
+            x1: rx + cell_w,
+            y1: ry + cell_h,
+        }
+        .intersect(clip);
+        if cell.is_empty() {
+            continue;
+        }
+        bounds = Some(match bounds {
+            Some((min_x, min_y, max_x, max_y)) => (
+                min_x.min(cell.x0),
+                min_y.min(cell.y0),
+                max_x.max(cell.x1),
+                max_y.max(cell.y1),
+            ),
+            None => (cell.x0, cell.y0, cell.x1, cell.y1),
+        });
+    }
+    bounds.map(|(min_x, min_y, max_x, max_y)| (min_x, min_y, max_x - min_x, max_y - min_y))
 }
 
 /// Map a node-local rectangle into a screen-space axis-aligned rectangle.
@@ -799,10 +1368,50 @@ pub fn node_screen_rect(
     Some((min_x, min_y, max_x - min_x, max_y - min_y))
 }
 
+/// Map a text selection span using the renderer's glyph-cell transform.
+pub fn node_text_selection_rect(
+    tree: &Tree,
+    styles: &StyleTable,
+    fonts: &Fonts,
+    screen: (f32, f32),
+    id: i32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    // 计算文字选区的屏幕矩形。
+    if ![x, y, w, h].iter().all(|value| value.is_finite()) || w < 0.0 || h < 0.0 {
+        return None;
+    }
+    let node = tree.get(id)?;
+    if node.node_type != spec::NodeType::Text as u8 {
+        return None;
+    }
+    // Nested Text nodes are absorbed into the nearest rendered text run.
+    let mut ancestor = node.parent;
+    while ancestor != 0 {
+        let parent = tree.get(ancestor)?;
+        if parent.node_type == spec::NodeType::Text as u8 {
+            return None;
+        }
+        ancestor = parent.parent;
+    }
+    let (world, clip, opacity) = node_text_selection_transform(tree, styles, screen, id)?;
+    let resolved = style::resolve(node, styles, true);
+    if alpha(scale_alpha(resolved.text_color, opacity)) == 0 {
+        return None;
+    }
+    text_selection_screen_rect(
+        tree, fonts, node, &resolved, &world, opacity, screen, &clip, x, y, w, h,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn hit_walk(
     tree: &Tree,
     styles: &StyleTable,
+    fonts: &Fonts,
     screen: (f32, f32),
     slot: u32,
     parent_world: Affine,
@@ -829,17 +1438,47 @@ fn hit_walk(
     if op <= 0.0 {
         return;
     }
+    // Text nodes claim only their visible glyph cells — which may extend
+    // beyond the layout box (wide cells, negative xoff). The glyph filters
+    // already apply clip/screen/cell bounds, so no layout-box gate applies.
+    if node.node_type == spec::NodeType::Text as u8 {
+        let mut glyphs = Vec::new();
+        if collect_visible_text_glyphs(
+            tree,
+            fonts,
+            node,
+            &r,
+            &world,
+            op,
+            &clip,
+            screen,
+            l.w,
+            &mut glyphs,
+        ) && fonts.atlas(r.font_slot as u8).is_some_and(|atlas| {
+            hit_text_glyph(
+                &glyphs,
+                atlas.cell_w as f32,
+                atlas.cell_h as f32,
+                &world,
+                &clip,
+                screen,
+                px,
+                py,
+            )
+        }) {
+            *hit = node.id(slot);
+        }
+        // Text children are absorbed into the node's glyph run (mirrors
+        // paint) — do not recurse.
+        return;
+    }
     let local = local_point(&world, px, py);
     let inside = local.is_some_and(|(lx, ly)| lx >= 0.0 && lx < l.w && ly >= 0.0 && ly < l.h);
     if inside {
         let (lx, ly) = local.unwrap();
-        if claims_hit(node, &r, styles, lx, ly, l.w, l.h) {
+        if claims_hit(node, &r, styles, op, &world, lx, ly, l.w, l.h) {
             *hit = node.id(slot);
         }
-    }
-    // Text children are absorbed into the node's glyph run (mirrors paint).
-    if node.node_type == spec::NodeType::Text as u8 {
-        return;
     }
     let mut child_clip = clip;
     if r.overflow == spec::Overflow::Hidden as u8 {
@@ -849,16 +1488,41 @@ fn hit_walk(
         }
     }
     if r.perspective > 0.0 {
-        // 3D context: projected geometry is not point-testable from the 2D
-        // walk — the context root claims its own box so clicks never fall
-        // through to content painted BEHIND the visible 3D subtree.
-        if inside {
+        // Route every visible projected child through the 3D hit path.
+        let mut content_hit = None;
+        let (center_x, center_y) = (l.w * 0.5, l.h * 0.5);
+        if child_clip.contains(px, py) {
+            for &cid in &node.children {
+                if let Some(cs) = tree.resolve(cid) {
+                    hit_3d(
+                        tree,
+                        styles,
+                        fonts,
+                        screen,
+                        cs,
+                        &Mat34::IDENTITY,
+                        op,
+                        &world,
+                        r.perspective,
+                        center_x,
+                        center_y,
+                        &child_clip,
+                        px,
+                        py,
+                        &mut content_hit,
+                    );
+                }
+            }
+        }
+        if let Some((_, is_text, id)) = content_hit {
+            *hit = if is_text { id } else { node.id(slot) };
+        } else if inside {
             *hit = node.id(slot);
         }
         return;
     }
     for_children_in_paint_order(tree, styles, slot, |cs| {
-        hit_walk(tree, styles, screen, cs, world, op, child_clip, px, py, hit);
+        hit_walk(tree, styles, fonts, screen, cs, world, op, child_clip, px, py, hit);
     });
 }
 
@@ -1252,32 +1916,10 @@ impl<'a> Walker<'a> {
         // lists this models: translate/translateZ leftmost, then rotate,
         // rotateX, rotateY, with 2D scale innermost), conjugated around the
         // transform origin.
-        let (ox, oy) = (l.w * (0.5 + r.origin_x), l.h * (0.5 + r.origin_y));
-        let mut local = Mat34::translate(l.x + r.translate_x, l.y + r.translate_y, r.translate_z)
-            .then(&Mat34::translate(ox, oy, 0.0));
-        if r.rotate != 0.0 {
-            local = local.then(&Mat34::rot_z(r.rotate));
-        }
-        if r.rotate_x != 0.0 {
-            local = local.then(&Mat34::rot_x(r.rotate_x));
-        }
-        if r.rotate_y != 0.0 {
-            local = local.then(&Mat34::rot_y(r.rotate_y));
-        }
-        let (sx, sy) = (r.scale * r.scale_x, r.scale * r.scale_y);
-        if sx != 1.0 || sy != 1.0 {
-            local = local.then(&Mat34::scale(sx, sy));
-        }
-        local = local.then(&Mat34::translate(-ox, -oy, 0.0));
-        let m2 = m.then(&local);
+        let m2 = m.then(&local_3d(&l, &r));
 
         let project = |x: f32, y: f32| -> ((f32, f32), f32) {
-            let (px, py, pz) = m2.apply(x, y, 0.0);
-            let denom = (distance - pz).max(1.0); // near guard
-            let f = distance / denom;
-            let lx = cx + (px - cx) * f;
-            let ly = cy + (py - cy) * f;
-            (root_world.apply(lx, ly), pz)
+            project_3d_point(&m2, root_world, distance, cx, cy, x, y)
         };
 
         // Background -> one flat quad (gradients flatten to the mid-blend;
@@ -1433,61 +2075,20 @@ impl<'a> Walker<'a> {
         if outer <= 0.0 || width <= 0.0 {
             return;
         }
-        let rmid = outer - width * 0.5;
-        let half = width * 0.5;
-        // Ring test in squared space (|d - rmid| <= half without the sqrt).
-        let ring_in = (rmid - half).max(0.0);
-        let ring_in2 = ring_in * ring_in;
-        let ring_out = rmid + half;
-        let ring_out2 = ring_out * ring_out;
-        let sweep = clampf(r.arc_sweep, -360.0, 360.0);
-        let (a0, asweep) = if sweep < 0.0 { (r.arc_start + sweep, -sweep) } else { (r.arc_start, sweep) };
-        let full = asweep >= 360.0;
-        let major = asweep > 180.0;
-        // 0 deg = 12 o'clock, clockwise positive.
-        let dir = |deg: f32| {
-            let rad = deg * (PI / 180.0);
-            (sinf(rad), -cosf(rad))
+        let Some(arc) = ArcGeometry::new(cx, cy, outer, width, r.arc_start, r.arc_sweep) else {
+            return;
         };
-        let (svx, svy) = dir(a0);
-        let (evx, evy) = dir(a0 + asweep);
-        let cap0 = (cx + svx * rmid, cy + svy * rmid);
-        let cap1 = (cx + evx * rmid, cy + evy * rmid);
-        let half2 = half * half;
-
+        let rmid = arc.rmid;
+        let half = arc.half;
+        let ring_in2 = arc.ring_in2;
+        let ring_out = rmid + half;
+        let ring_out2 = arc.ring_out2;
         let x0 = floorf(clampf(cx - outer, clip.x0, clip.x1)) as i32;
         let x1 = ceilf(clampf(cx + outer, clip.x0, clip.x1)) as i32;
         let y0 = floorf(clampf(cy - outer, clip.y0, clip.y1)) as i32;
         let y1 = ceilf(clampf(cy + outer, clip.y0, clip.y1)) as i32;
 
-        let covered = |px: f32, py: f32| -> bool {
-            let dx = px - cx;
-            let dy = py - cy;
-            let d2 = dx * dx + dy * dy;
-            let in_ring = d2 >= ring_in2 && d2 <= ring_out2;
-            if in_ring {
-                let in_angle = full || {
-                    let cross_s = svx * dy - svy * dx;
-                    let cross_e = evx * dy - evy * dx;
-                    if major { cross_s >= 0.0 || cross_e <= 0.0 } else { cross_s >= 0.0 && cross_e <= 0.0 }
-                };
-                if in_angle {
-                    return true;
-                }
-            }
-            if full {
-                return false;
-            }
-            // Round caps at both endpoints.
-            let d0x = px - cap0.0;
-            let d0y = py - cap0.1;
-            if d0x * d0x + d0y * d0y <= half2 {
-                return true;
-            }
-            let d1x = px - cap1.0;
-            let d1y = py - cap1.1;
-            d1x * d1x + d1y * d1y <= half2
-        };
+        let covered = |px: f32, py: f32| arc.contains(px, py);
 
         for row in y0..y1 {
             // Row clamp: only columns whose pixel can touch the OUTER circle
@@ -2340,42 +2941,34 @@ impl<'a> Walker<'a> {
         if alpha(color) == 0 {
             return;
         }
-        let slot = r.font_slot as u8;
-        let Some(atlas) = self.fonts.atlas(slot) else { return };
-        let (cell_w, cell_h) = (atlas.cell_w as f32, atlas.cell_h as f32);
-        let mut run = alloc::string::String::new();
-        // paint() gives us the node ref; re-walk its subtree for the run.
-        // (node.children ids resolve through self.tree.)
-        collect_run_of(self.tree, node, &mut run);
-        if run.is_empty() {
+        let mut scratch = core::mem::take(&mut self.glyph_scratch);
+        if !collect_visible_text_glyphs(
+            self.tree,
+            self.fonts,
+            node,
+            r,
+            world,
+            op,
+            clip,
+            self.screen,
+            box_w,
+            &mut scratch,
+        ) {
+            self.glyph_scratch = scratch;
             return;
         }
-        let mut scratch = core::mem::take(&mut self.glyph_scratch);
-        scratch.clear();
-        self.fonts
-            .layout_run(&run, slot, r.tracking, r.line_height, r.text_align, box_w, &mut scratch);
+        let slot = r.font_slot as u8;
         let start = dl.words.len();
         dl.words.push(spec::draw_op::GLYPH_RUN);
         dl.words.push(0); // patched below: slot | count << 16
         dl.words.push(color);
         let mut n: u32 = 0;
         for g in &scratch {
-            // Glyph cells stay axis-aligned; only the anchor transforms.
-            let (sx, sy) = world.apply(g.x, g.y);
-            let (rx, ry) = (roundf(sx), roundf(sy));
-            // Coordinate-range invariant: cell top-left must sit in
-            // [0,SCREEN]; cells that can't be represented are dropped, and
-            // cells fully outside the clip are dropped (backend scissor
-            // pixel-clips partial overlap inside overflow-hidden regions).
-            if rx < 0.0 || ry < 0.0 || rx > self.screen.0 || ry > self.screen.1 {
-                continue;
-            }
-            if sx + cell_w <= clip.x0 || sx >= clip.x1 || sy + cell_h <= clip.y0 || sy >= clip.y1 {
-                continue;
-            }
             if n == u16::MAX as u32 {
                 break;
             }
+            let (sx, sy) = world.apply(g.x, g.y);
+            let (rx, ry) = (roundf(sx), roundf(sy));
             dl.words.push(xy_word(rx, ry));
             dl.words.push(glyph_word(g.gid, sx - rx, sy - ry));
             n += 1;
@@ -2401,6 +2994,91 @@ fn collect_run_of(tree: &Tree, node: &crate::tree::Node, out: &mut alloc::string
             }
         }
     }
+}
+
+/// Keep only glyphs that the renderer can emit for this text run.
+#[allow(clippy::too_many_arguments)]
+fn collect_visible_text_glyphs(
+    tree: &Tree,
+    fonts: &Fonts,
+    node: &Node,
+    resolved: &style::Resolved,
+    world: &Affine,
+    opacity: f32,
+    clip: &Clip,
+    screen: (f32, f32),
+    box_w: f32,
+    glyphs: &mut Vec<crate::text::GlyphPos>,
+) -> bool {
+    if alpha(scale_alpha(resolved.text_color, opacity)) == 0 {
+        return false;
+    }
+    let slot = resolved.font_slot as u8;
+    let Some(atlas) = fonts.atlas(slot) else { return false };
+    let mut run = String::new();
+    collect_run_of(tree, node, &mut run);
+    if run.is_empty() {
+        return false;
+    }
+    glyphs.clear();
+    fonts.layout_run(
+        &run,
+        slot,
+        resolved.tracking,
+        resolved.line_height,
+        resolved.text_align,
+        box_w,
+        glyphs,
+    );
+    let cell_w = atlas.cell_w as f32;
+    let cell_h = atlas.cell_h as f32;
+    let mut visible = 0;
+    for index in 0..glyphs.len() {
+        let glyph = glyphs[index];
+        let (sx, sy) = world.apply(glyph.x, glyph.y);
+        let (rx, ry) = (roundf(sx), roundf(sy));
+        if rx < 0.0 || ry < 0.0 || rx > screen.0 || ry > screen.1 {
+            continue;
+        }
+        if sx + cell_w <= clip.x0 || sx >= clip.x1 || sy + cell_h <= clip.y0 || sy >= clip.y1 {
+            continue;
+        }
+        glyphs[visible] = glyph;
+        visible += 1;
+    }
+    let visible = visible.min(u16::MAX as usize);
+    glyphs.truncate(visible);
+    visible > 0
+}
+
+/// Match a screen point against the visible glyph cells of a text run.
+fn hit_text_glyph(
+    glyphs: &[crate::text::GlyphPos],
+    atlas_cell_w: f32,
+    atlas_cell_h: f32,
+    world: &Affine,
+    clip: &Clip,
+    screen: (f32, f32),
+    px: f32,
+    py: f32,
+) -> bool {
+    // 将屏幕点击匹配到可见的字形单元。
+    for g in glyphs.iter().take(u16::MAX as usize) {
+        let (sx, sy) = world.apply(g.x, g.y);
+        let (rx, ry) = glyph_cell_origin(sx, sy);
+        if rx < 0.0 || ry < 0.0 || rx > screen.0 || ry > screen.1 {
+            continue;
+        }
+        if rx + atlas_cell_w <= clip.x0 || rx >= clip.x1 || ry + atlas_cell_h <= clip.y0 || ry >= clip.y1 {
+            continue;
+        }
+        let cell_right = (rx + atlas_cell_w).min(screen.0);
+        let cell_bottom = (ry + atlas_cell_h).min(screen.1);
+        if px >= rx && px < cell_right && py >= ry && py < cell_bottom {
+            return true;
+        }
+    }
+    false
 }
 
 // ---- Sutherland-Hodgman with color interpolation -------------------------------

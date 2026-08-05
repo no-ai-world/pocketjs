@@ -140,6 +140,21 @@ enum HostOperation {
     HostSetFocus,
     HostSetActive,
     HostHitTest,
+    HostNodeLocalPoint,
+    HostNodeLocalX,
+    HostNodeLocalY,
+    HostNodeTextLayout,
+    HostNodeTextWidth,
+    HostNodeTextFontSlot,
+    HostNodeTextAlign,
+    HostNodeTextTracking,
+    HostNodeTextLineHeight,
+    HostNodeScreenRect,
+    HostNodeTextSelectionRect,
+    HostNodeScreenRectX,
+    HostNodeScreenRectY,
+    HostNodeScreenRectW,
+    HostNodeScreenRectH,
     HostSetCursor,
     HostSetCursorPos,
     HostLoadStyles,
@@ -688,6 +703,59 @@ bool bytesArgument(
     return true;
 }
 
+bool setFloatProperty(
+    JSContext *context,
+    JSValue object,
+    const char *name,
+    float value
+)
+{
+    // 设置一个浮点对象属性。
+    return JS_SetPropertyStr(
+        context,
+        object,
+        name,
+        JS_NewFloat64(context, static_cast<double>(value))
+    ) >= 0;
+}
+
+JSValue createNodeRectObject(
+    JSContext *context,
+    float x,
+    float y,
+    float width,
+    float height
+)
+{
+    // 创建节点屏幕矩形对象。
+    JSValue object = JS_NewObject(context);
+    if (JS_IsException(object)) return object;
+    if (!setFloatProperty(context, object, "x", x) ||
+        !setFloatProperty(context, object, "y", y) ||
+        !setFloatProperty(context, object, "width", width) ||
+        !setFloatProperty(context, object, "height", height)) {
+        JS_FreeValue(context, object);
+        return JS_EXCEPTION;
+    }
+    return object;
+}
+
+JSValue createNodeTextLayoutObject(JSContext *context)
+{
+    // 创建节点文字布局对象。
+    JSValue object = JS_NewObject(context);
+    if (JS_IsException(object)) return object;
+    if (!setFloatProperty(context, object, "width", ui_node_text_width()) ||
+        !setFloatProperty(context, object, "fontSlot", ui_node_text_font_slot()) ||
+        !setFloatProperty(context, object, "textAlign", ui_node_text_align()) ||
+        !setFloatProperty(context, object, "tracking", ui_node_text_tracking()) ||
+        !setFloatProperty(context, object, "lineHeight", ui_node_text_line_height())) {
+        JS_FreeValue(context, object);
+        return JS_EXCEPTION;
+    }
+    return object;
+}
+
 JSValue hostOperation(
     JSContext *context,
     JSValueConst,
@@ -848,6 +916,89 @@ JSValue hostOperation(
             context,
             ui_hit_test(static_cast<float>(da), static_cast<float>(db))
         );
+
+    case HostNodeLocalPoint:
+        if (!intArgument(context, argc, argv, 0, &a) ||
+            !floatArgument(context, argc, argv, 1, &da) ||
+            !floatArgument(context, argc, argv, 2, &db)) {
+            return JS_EXCEPTION;
+        }
+        return JS_NewInt32(
+            context,
+            ui_node_local_point(a, static_cast<float>(da), static_cast<float>(db))
+        );
+
+    case HostNodeLocalX:
+        return JS_NewFloat64(context, ui_node_local_x());
+
+    case HostNodeLocalY:
+        return JS_NewFloat64(context, ui_node_local_y());
+
+    case HostNodeTextLayout:
+        if (!intArgument(context, argc, argv, 0, &a)) return JS_EXCEPTION;
+        if (!ui_node_text_layout(a)) return JS_NULL;
+        return createNodeTextLayoutObject(context);
+
+    case HostNodeTextWidth:
+        return JS_NewFloat64(context, ui_node_text_width());
+
+    case HostNodeTextFontSlot:
+        return JS_NewFloat64(context, ui_node_text_font_slot());
+
+    case HostNodeTextAlign:
+        return JS_NewFloat64(context, ui_node_text_align());
+
+    case HostNodeTextTracking:
+        return JS_NewFloat64(context, ui_node_text_tracking());
+
+    case HostNodeTextLineHeight:
+        return JS_NewFloat64(context, ui_node_text_line_height());
+
+    case HostNodeScreenRect:
+    case HostNodeTextSelectionRect:
+        if (!intArgument(context, argc, argv, 0, &a) ||
+            !floatArgument(context, argc, argv, 1, &da) ||
+            !floatArgument(context, argc, argv, 2, &db) ||
+            !floatArgument(context, argc, argv, 3, &dc) ||
+            !floatArgument(context, argc, argv, 4, &dd)) {
+            return JS_EXCEPTION;
+        }
+        if (magic == HostNodeScreenRect) {
+            if (!ui_node_screen_rect(
+                    a,
+                    static_cast<float>(da),
+                    static_cast<float>(db),
+                    static_cast<float>(dc),
+                    static_cast<float>(dd))) {
+                return JS_NULL;
+            }
+        } else if (!ui_node_text_selection_rect(
+                       a,
+                       static_cast<float>(da),
+                       static_cast<float>(db),
+                       static_cast<float>(dc),
+                       static_cast<float>(dd))) {
+            return JS_NULL;
+        }
+        return createNodeRectObject(
+            context,
+            ui_node_screen_rect_x(),
+            ui_node_screen_rect_y(),
+            ui_node_screen_rect_w(),
+            ui_node_screen_rect_h()
+        );
+
+    case HostNodeScreenRectX:
+        return JS_NewFloat64(context, ui_node_screen_rect_x());
+
+    case HostNodeScreenRectY:
+        return JS_NewFloat64(context, ui_node_screen_rect_y());
+
+    case HostNodeScreenRectW:
+        return JS_NewFloat64(context, ui_node_screen_rect_w());
+
+    case HostNodeScreenRectH:
+        return JS_NewFloat64(context, ui_node_screen_rect_h());
 
     case HostSetCursor:
         if (!intArgument(context, argc, argv, 0, &a) ||
@@ -1018,6 +1169,21 @@ bool installHostOps(
     addHostOperation(context, ui, "setFocus", 1, HostSetFocus);
     addHostOperation(context, ui, "setActive", 2, HostSetActive);
     addHostOperation(context, ui, "hitTest", 2, HostHitTest);
+    addHostOperation(context, ui, "nodeLocalPoint", 3, HostNodeLocalPoint);
+    addHostOperation(context, ui, "nodeLocalX", 0, HostNodeLocalX);
+    addHostOperation(context, ui, "nodeLocalY", 0, HostNodeLocalY);
+    addHostOperation(context, ui, "nodeTextLayout", 1, HostNodeTextLayout);
+    addHostOperation(context, ui, "nodeTextWidth", 0, HostNodeTextWidth);
+    addHostOperation(context, ui, "nodeTextFontSlot", 0, HostNodeTextFontSlot);
+    addHostOperation(context, ui, "nodeTextAlign", 0, HostNodeTextAlign);
+    addHostOperation(context, ui, "nodeTextTracking", 0, HostNodeTextTracking);
+    addHostOperation(context, ui, "nodeTextLineHeight", 0, HostNodeTextLineHeight);
+    addHostOperation(context, ui, "nodeScreenRect", 5, HostNodeScreenRect);
+    addHostOperation(context, ui, "nodeTextSelectionRect", 5, HostNodeTextSelectionRect);
+    addHostOperation(context, ui, "nodeScreenRectX", 0, HostNodeScreenRectX);
+    addHostOperation(context, ui, "nodeScreenRectY", 0, HostNodeScreenRectY);
+    addHostOperation(context, ui, "nodeScreenRectW", 0, HostNodeScreenRectW);
+    addHostOperation(context, ui, "nodeScreenRectH", 0, HostNodeScreenRectH);
     addHostOperation(context, ui, "setCursor", 5, HostSetCursor);
     addHostOperation(context, ui, "setCursorPos", 2, HostSetCursorPos);
     addHostOperation(context, ui, "loadStyles", 1, HostLoadStyles);

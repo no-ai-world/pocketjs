@@ -59,6 +59,21 @@ void ui_cancel_anim(int32_t animation_id);
 void ui_set_focus(int32_t id);
 void ui_set_active(int32_t id, int32_t active);
 int32_t ui_hit_test(float x, float y);
+int32_t ui_node_local_point(int32_t id, float x, float y);
+float ui_node_local_x(void);
+float ui_node_local_y(void);
+int32_t ui_node_text_layout(int32_t id);
+float ui_node_text_width(void);
+float ui_node_text_font_slot(void);
+float ui_node_text_align(void);
+float ui_node_text_tracking(void);
+float ui_node_text_line_height(void);
+int32_t ui_node_screen_rect(int32_t id, float x, float y, float w, float h);
+int32_t ui_node_text_selection_rect(int32_t id, float x, float y, float w, float h);
+float ui_node_screen_rect_x(void);
+float ui_node_screen_rect_y(void);
+float ui_node_screen_rect_w(void);
+float ui_node_screen_rect_h(void);
 void ui_set_cursor(
     int32_t texture,
     float hot_x,
