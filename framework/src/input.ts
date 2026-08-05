@@ -980,10 +980,6 @@ function pointerContactFrame(buttons: number, pressed: number, released: number)
       focused === pointerHoverFocus;
     const textOwner = textSelectionPointer?.owner ?? null;
     const textWasDragged = textSelectionPointer?.dragged ?? false;
-<<<<<<< Updated upstream
-    const hadTextCapture = hasTextSelectionPointerCapture();
-=======
->>>>>>> Stashed changes
     if (hadTextCapture) {
       cancelTextSelectionPointer();
       clearTextSelectionPointer();
