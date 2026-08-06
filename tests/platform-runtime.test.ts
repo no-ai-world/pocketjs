@@ -189,7 +189,11 @@ test("parallel bundles receive their own generated style table", async () => {
           entry,
           generatedStyles:
             `globalThis.__pocketStyleBuildMarker = ${JSON.stringify(marker)};\n` +
-            `export const STYLE_IDS: Record<string, number> = ${JSON.stringify({ [marker]: 1 })};`,
+            `export const STYLE_IDS: Record<string, number> = ${JSON.stringify({ [marker]: 1 })};\n` +
+            // text-selection.ts imports these from styles.generated.ts (670e118);
+            // the per-bundle stub must provide them or the build fails.
+            `export const DEFAULT_FONT_SLOT = 2;\n` +
+            `export const FONT_SLOTS: Record<number, { px: number; bold: boolean; lineHeight?: number }> = {};`,
         })],
       });
       expect(result.success).toBe(true);
