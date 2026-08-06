@@ -19,8 +19,9 @@
 //! D-pad, Z/Enter = CROSS, X = CIRCLE, A = SQUARE, S = TRIANGLE, Q/W = L/R,
 //! Tab = SELECT, Space = START, I/J/K/L = nub.
 //!
-//! Bundles/paks come from the PocketJS build (`bun tools/build.ts <app>`);
-//! the widget looks in `<repo>/dist` (override: POCKETJS_DIST or --js/--pak).
+//! Bundles/paks come from the PocketJS build (`bun tools/build.ts <app>`).
+//! Run from engine/pocket3d with POCKETJS_DIST=../../dist (override: POCKETJS_DIST
+//! or explicit --js/--pak paths; otherwise ./dist relative to the cwd).
 
 mod device;
 mod media;
@@ -1065,20 +1066,13 @@ fn headless_frame_size(window_size: (u32, u32)) -> Result<(u32, u32)> {
     ))
 }
 
-/// `<repo>/dist` — relative to this crate in the source tree, or
-/// POCKETJS_DIST, or ./dist for standalone binaries.
+/// `<repo>/dist` — POCKETJS_DIST, or ./dist when run from the repo root.
 fn dist_dir() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("POCKETJS_DIST") {
         return Some(PathBuf::from(d));
     }
-    let from_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../dist")
-        .canonicalize()
-        .ok();
-    from_manifest.or_else(|| {
-        let cwd = PathBuf::from("dist");
-        cwd.is_dir().then_some(cwd)
-    })
+    let cwd = PathBuf::from("dist");
+    cwd.is_dir().then_some(cwd)
 }
 
 fn resolve_asset(explicit: Option<PathBuf>, app: &str, ext: &str) -> Result<PathBuf> {

@@ -1,6 +1,9 @@
 // Desktop launcher argv ownership and pass-through boundary tests.
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   assertNoDesktopFlags,
   hasDesktopFlag,
@@ -67,5 +70,16 @@ describe("desktop launcher arguments", () => {
     expect(() => parseDesktopArgs(["--companion-arg"], [])).toThrow(
       "--companion-arg needs a value",
     );
+  });
+
+  test("launchers pass POCKETJS_DIST to the native binary", () => {
+    // dist 是运行期输入，必须由 launcher 显式传给原生二进制（构建到哪、加载哪）。
+    // 回归保护：若 launcher 再漏传 POCKETJS_DIST，二进制将退回 cwd 的 ./dist，
+    // 在非仓库根目录运行时会失败（junction 共享产物时曾去错误的 dist 找 js/pak）。
+    const root = fileURLToPath(new URL("..", import.meta.url));
+    for (const launcher of ["tools/app-widget.ts", "tools/note.ts"]) {
+      const src = readFileSync(join(root, launcher), "utf8");
+      expect(src.includes(`POCKETJS_DIST: join(root, "dist")`)).toBe(true);
+    }
   });
 });

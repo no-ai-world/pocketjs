@@ -4,7 +4,8 @@
 // density-2 pak (crisp text on 2x displays):
 //
 //   bun tools/build.ts note-main --density=2
-//   cargo run -p note-widget                       (engine/pocket3d/examples)
+//   cd engine/pocket3d
+//   POCKETJS_DIST=../../dist cargo run -p note-widget   # dist lives at the repo root
 //
 // The same bundle boots on any ui host — without the widget host's svc
 // channel it renders the sample note read-only (d-pad scrolls).

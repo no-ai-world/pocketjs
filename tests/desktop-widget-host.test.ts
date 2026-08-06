@@ -103,7 +103,10 @@ describe("desktop-widget host invariants", () => {
       join(root, "engine/pocket3d/examples/note-widget/src/lib.rs"),
       "utf8",
     );
-    expect(runtime).toContain('.join("../../../../dist")');
+    // dist 解析契约：POCKETJS_DIST 显式优先，cwd ./dist 兜底；编译时路径已移除。
+    expect(runtime).toContain('std::env::var("POCKETJS_DIST")');
+    expect(runtime).toContain('PathBuf::from("dist")');
+    expect(runtime).not.toContain('.join("../../../../dist")');
   });
 
   test("framework exposes TextInput, text-edit, and host-input split", () => {

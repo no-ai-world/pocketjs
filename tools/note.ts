@@ -112,6 +112,9 @@ const env = {
   ...process.env,
   RUST_LOG: process.env.RUST_LOG ?? "info",
   POCKETJS_HOST: target,
+  // dist 是运行期输入：由 launcher 显式声明——构建到哪、就加载哪，
+  // 不依赖二进制编译位置（与 tools/widget.ts 的 POCKETJS_DIST 先例一致）。
+  POCKETJS_DIST: join(root, "dist"),
 };
 const noteTitle = "Pocket Note";
 

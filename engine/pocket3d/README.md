@@ -59,7 +59,8 @@ QuickJS guest (`pocket-mod`), the same `pocketjs-core`, rendered through wgpu
 ```sh
 # from the repo root: build a demo, then host it
 bun tools/build.ts hero-main
-cd pocket3d
+cd engine/pocket3d
+export POCKETJS_DIST=../../dist       # dist lives at the repo root
 cargo run -p uihost -- --app hero-main                # window, 2x scale
 cargo run -p uihost -- --app hero-main --screenshot out.png --frames 10
 ```
@@ -98,7 +99,8 @@ Or by hand:
 
 ```sh
 bun tools/build.ts hero-main   # from the repo root
-cd pocket3d
+cd engine/pocket3d
+export POCKETJS_DIST=../../dist       # dist lives at the repo root
 cargo run -p pocket-stage -- --app hero-main
 cargo run -p pocket-stage -- --app hero-main --screenshot out.png --frames 30
 ```
@@ -141,7 +143,8 @@ pipeline does all dispatch.
 
 ```sh
 bun tools/build.ts note-main --density=2   # from the repo root
-cd pocket3d
+cd engine/pocket3d
+export POCKETJS_DIST=../../dist       # dist lives at the repo root
 cargo run -p note-widget
 cargo run -p note-widget -- --file ~/notes/todo.md --width 380 --height 520
 ```

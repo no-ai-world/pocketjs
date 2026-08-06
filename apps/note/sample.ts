@@ -20,7 +20,9 @@ A markdown sticky for your desktop — one process, a real PocketJS app.
 > same bytes as the PSP build.
 
 \`\`\`
-bun tools/build.ts note-main --density=2
+bun tools/build.ts note-main --density=2   # from the repo root
+cd engine/pocket3d
+export POCKETJS_DIST=../../dist             # dist lives at the repo root
 cargo run -p note-widget
 \`\`\`
 

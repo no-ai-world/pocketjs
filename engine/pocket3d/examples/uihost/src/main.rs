@@ -10,8 +10,12 @@
 //!   cargo run -p uihost -- --app hero --screenshot out.png --frames 10
 //!
 //! Bundles/paks come from the PocketJS build (`bun tools/build.ts <app>`
-//! at the repo root); uihost looks in `<repo>/dist` (override: POCKETJS_DIST
-//! or explicit --js/--pak paths).
+//! at the repo root). Run from engine/pocket3d, pointing at the repo dist:
+//!
+//!   POCKETJS_DIST=../../dist cargo run -p uihost -- --app hero
+//!
+//! (override: POCKETJS_DIST, or explicit --js/--pak paths; otherwise ./dist
+//! relative to the working directory).
 //!
 //! Input map (PSP buttons): arrows = D-pad, Z/Enter = CROSS, X = CIRCLE,
 //! A = SQUARE, S = TRIANGLE, Q/W = L/R triggers, Tab = SELECT,
@@ -87,18 +91,13 @@ fn parse_args() -> Result<Args> {
     Ok(args)
 }
 
-/// `<repo>/dist` — relative to this crate in the source tree, or
-/// POCKETJS_DIST, or ./dist for standalone binaries.
+/// `<repo>/dist` — POCKETJS_DIST, or ./dist when run from the repo root.
 fn dist_dir() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("POCKETJS_DIST") {
         return Some(PathBuf::from(d));
     }
-    let from_manifest =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../dist").canonicalize().ok();
-    from_manifest.or_else(|| {
-        let cwd = PathBuf::from("dist");
-        cwd.is_dir().then_some(cwd)
-    })
+    let cwd = PathBuf::from("dist");
+    cwd.is_dir().then_some(cwd)
 }
 
 fn resolve_asset(explicit: Option<PathBuf>, app: &str, ext: &str) -> Result<PathBuf> {

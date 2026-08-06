@@ -1442,20 +1442,13 @@ fn parse_args() -> Result<Args> {
     Ok(args)
 }
 
-/// `<repo>/dist` — relative to this crate in the source tree, or
-/// POCKETJS_DIST, or ./dist for standalone binaries.
+/// `<repo>/dist` — POCKETJS_DIST, or ./dist when run from the repo root.
 fn dist_dir() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("POCKETJS_DIST") {
         return Some(PathBuf::from(d));
     }
-    let from_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../dist")
-        .canonicalize()
-        .ok();
-    from_manifest.or_else(|| {
-        let cwd = PathBuf::from("dist");
-        cwd.is_dir().then_some(cwd)
-    })
+    let cwd = PathBuf::from("dist");
+    cwd.is_dir().then_some(cwd)
 }
 
 fn resolve_asset(explicit: Option<PathBuf>, app: &str, ext: &str) -> Result<PathBuf> {
