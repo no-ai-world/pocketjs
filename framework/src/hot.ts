@@ -25,7 +25,7 @@
 
 import { NODE_TYPE, PROP, type PropName } from "../../contracts/spec/spec.ts";
 import { encodePropValue, getOps } from "./host.ts";
-import type { NodeMirror } from "./native-tree.ts";
+import { notifyTextContent, type NodeMirror } from "./native-tree.ts";
 
 const lastText = new WeakMap<NodeMirror, string>();
 const lastProp = new WeakMap<NodeMirror, Record<string, number>>();
@@ -51,6 +51,7 @@ export function text(node: NodeMirror | undefined, value: string | number): void
   lastText.set(target, s);
   target.text = s; // keep the JS mirror (and DevTools' tree) truthful
   getOps().setText(target.id, s);
+  notifyTextContent(s); // 与 replaceText 同源：hot 写的中文也要走运行时字形上报
 }
 
 /** Imperatively set a numeric style prop (opacity, scaleX, translateX, …). */

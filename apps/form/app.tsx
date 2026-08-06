@@ -16,6 +16,7 @@ export default function Form() {
 
   const canEdit = hasFeature("input.text");
   const [name, setName] = createSignal("");
+  const [phone, setPhone] = createSignal("");
   const [note, setNote] = createSignal("");
   const [status, setStatus] = createSignal(canEdit ? "ready" : "read-only host");
   const [submitted, setSubmitted] = createSignal("");
@@ -50,10 +51,10 @@ export default function Form() {
   });
 
   const submit = () => {
-    const line = `${name().trim()} · ${note().trim()}`;
+    const line = `${name().trim()} · ${phone().trim()} · ${note().trim()}`;
     setSubmitted(line);
     setStatus("submitted");
-    companion?.send({ t: "submit", name: name(), note: note() });
+    companion?.send({ t: "submit", name: name(), phone: phone(), note: note() });
   };
 
   return (
@@ -81,7 +82,24 @@ export default function Form() {
       </View>
 
       <View class="flex-col gap-1">
-        <Text class="text-xs text-slate-600">Note</Text>
+        <Text class="text-xs text-slate-600">电话 Telephone</Text>
+        <Show
+          when={canEdit}
+          fallback={<Text class="text-sm text-slate-400">input.text unavailable</Text>}
+        >
+          <TextInput
+            value={phone()}
+            onChange={setPhone}
+            onSubmit={submit}
+            placeholder="手机号码"
+            maxWidth={280}
+            class="relative flex-row items-center h-[32] px-2 rounded-md bg-white border-slate-300 focus:border-indigo-500"
+          />
+        </Show>
+      </View>
+
+      <View class="flex-col gap-1">
+        <Text class="text-xs text-slate-600">备注</Text>
         <Show when={canEdit}>
           <TextInput
             value={note()}

@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
+use ab_glyph::{Font, FontRef, point};
 
 const FONT_MAGIC: u32 = 0x4146_4344; // 'DCFA' LE
 const HEADER: usize = 16;
@@ -283,17 +283,22 @@ impl SlotAtlas {
         }
         let px = slot_px(self.slot);
         let density = self.density as f32;
-        let advance = font
-            .as_scaled(PxScale::from(px))
-            .h_advance(gid_font)
+        // ab_glyph 的 PxScale 以行高（ascent - descent）为分母，不是 em；而
+        // bake-font 用 px / upm（em 基准）烘焙。不补偿会让运行时补的 CJK 字形
+        // 比同槽烘焙字形小（雅黑行高 1.32em → 缩水 ~24%）。这里统一回 em 基准：
+        // 每 font unit 的像素数 = px / upm，再乘回 height 得到 ab_glyph 语义的 scale。
+        let upm = font.units_per_em().unwrap_or(2048.0);
+        let em_scale = px / upm;
+        let advance = (font.h_advance_unscaled(gid_font) * em_scale)
             .round()
             .clamp(0.0, 255.0) as u8;
 
         let cov_w = self.cell_w as usize * self.density as usize;
         let cov_h = self.cell_h as usize * self.density as usize;
         let mut cell = vec![0u8; cov_w * cov_h];
+        let ab_scale = em_scale * font.height_unscaled();
         let glyph = gid_font.with_scale_and_position(
-            PxScale::from(px * density),
+            ab_scale * density,
             point(0.0, self.baseline as f32 * density),
         );
         if let Some(outlined) = font.outline_glyph(glyph) {
@@ -442,5 +447,40 @@ mod tests {
         assert!(is_font_file(Path::new("custom.OTC")));
         assert!(!is_font_file(Path::new("custom.txt")));
         assert!(!is_font_file(Path::new("custom")));
+    }
+
+    #[test]
+    fn em_based_rasterization_matches_bake_font_semantics() {
+        // 运行时补字形必须按 1em = px 渲染（bake-font 的 px / upm 基准），
+        // 而不是 ab_glyph PxScale 的行高基准（行高 > em 时字形会缩水）。
+        use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let font_path = Path::new(manifest)
+            .join("../../../../assets/fonts/Inter-Regular.ttf");
+        let data = std::fs::read(font_path).expect("Inter-Regular.ttf");
+        let leaked: &'static [u8] = Box::leak(data.into_boxed_slice());
+        let font = FontRef::try_from_slice(leaked).expect("parse Inter");
+        let px = 12.0f32;
+        let upm = font.units_per_em().unwrap();
+        let em_scale = px / upm;
+
+        // em 基准 advance = font units * px / upm；行高基准（PxScale）必然更小。
+        let gid = font.glyph_id('A');
+        let em_advance = font.h_advance_unscaled(gid) * em_scale;
+        let line_advance = font.as_scaled(PxScale::from(px)).h_advance(gid);
+        assert!(em_advance > line_advance, "em-basis must exceed line-height basis");
+
+        // outline 按 em 基准渲染：'A' 大写高 ≈ 0.74em。
+        let glyph = gid.with_scale_and_position(
+            em_scale * font.height_unscaled(),
+            point(0.0, 0.0),
+        );
+        let bounds = font.outline_glyph(glyph).expect("outline").px_bounds();
+        let ink = bounds.height();
+        assert!(
+            (ink - px * 0.74).abs() < 1.2,
+            "Inter 'A' cap height at 1em={px}px should be ~{:.1}px, got {ink:.1}px",
+            px * 0.74
+        );
     }
 }

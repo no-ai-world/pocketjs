@@ -21,7 +21,7 @@ import {
   clearTextSelection as resetTextSelection,
   reconcileTextSelection,
 } from "./text-selection.ts";
-import type { NodeMirror } from "./native-tree.ts";
+import { setTextContentReporter, type NodeMirror } from "./native-tree.ts";
 
 /** 壳 → guest 的稳定输入事件（不含 companion 业务 JSON）。 */
 type HostSource = "shell" | "host";
@@ -667,6 +667,7 @@ export function installHostInputPump(opts?: { channelName?: string; bindCleanup?
   if (!input) return () => {};
   pumpUsers++;
   pumpChannelName ??= channelName;
+  flushTextGlyphs(channelName); // 通道就绪，补发模板解析期积压的字形
 
   if (!pumpDisposer) {
     pumpChannel = input;
@@ -700,10 +701,62 @@ export function installHostInputPump(opts?: { channelName?: string; bindCleanup?
 }
 
 /** 请求宿主为任意运行时字符串扩展字形（text.glyphs.runtime）。 */
+/** 请求宿主为任意运行时字符串扩展字形（text.glyphs.runtime）。 */
 export function ensureText(text: string): void {
   if (!text) return;
   const channel = resolveInputChannel("input");
-  channel?.send({ t: "ensure_text", text });
+  if (!channel) return;
+  // 显式请求视为已确认，渲染路径不再重复上报同一码点。
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!;
+    if (cp > 0x7f) reportedGlyphCodepoints.add(cp);
+  }
+  channel.send({ t: "ensure_text", text });
+}
+
+/** 已确认送达宿主的非 ASCII 码点：宿主按 slot known 集合幂等，重复码点无需再发。 */
+const reportedGlyphCodepoints = new Set<number>();
+/** 宿主通道暂不可用（svcOpen 失败）时积压的码点，通道恢复后补发。 */
+const pendingGlyphCodepoints = new Set<number>();
+
+function flushPendingGlyphs(channelName: string): void {
+  if (pendingGlyphCodepoints.size === 0) return;
+  const channel = resolveInputChannel(channelName);
+  if (!channel) return;
+  let missing = "";
+  for (const cp of pendingGlyphCodepoints) {
+    missing += String.fromCodePoint(cp);
+    reportedGlyphCodepoints.add(cp);
+  }
+  pendingGlyphCodepoints.clear();
+  channel.send({ t: "ensure_text", text: missing });
+}
+
+function reportRenderedText(text: string): void {
+  // 渲染文本只上报非 ASCII 码点（CJK 等）；通道不可用时先积压，恢复后补发，
+  // 只有确认通道可用才记为“已上报”——避免模板/热更时序下丢字形。
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!;
+    if (cp <= 0x7f) continue;
+    if (reportedGlyphCodepoints.has(cp) || pendingGlyphCodepoints.has(cp)) continue;
+    pendingGlyphCodepoints.add(cp);
+  }
+  flushPendingGlyphs(pumpChannelName ?? "input");
+}
+
+// 渲染文本进树即上报；无 svc 宿主（PSP 等）的 ensureText 本身是 no-op。
+setTextContentReporter(reportRenderedText);
+
+/** 宿主通道就绪时补发积压字形（pump 安装后调用；幂等，pending 空时零开销）。 */
+export function flushTextGlyphs(channelName = "input"): void {
+  flushPendingGlyphs(channelName);
+}
+
+/** 测试：重置已上报/积压码点集合并恢复上报钩子。 */
+export function __resetTextGlyphReporterForTest(): void {
+  reportedGlyphCodepoints.clear();
+  pendingGlyphCodepoints.clear();
+  setTextContentReporter(reportRenderedText);
 }
 
 /** Reset local input state shared between mounts. */

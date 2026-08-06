@@ -427,10 +427,26 @@ export function createElement(tag: string): NodeMirror {
   });
 }
 
+/** 文本内容进入原生树时的外部通知（运行时字形回退：宿主按码点栅格化缺失 glyph）。 */
+export type TextContentReporter = (text: string) => void;
+
+let textContentReporter: TextContentReporter | null = null;
+
+/** 注入/移除文本内容上报钩子；无钩子时文本进树零开销。 */
+export function setTextContentReporter(reporter: TextContentReporter | null): void {
+  textContentReporter = reporter;
+}
+
+/** 上报钩子唯一入口：createTextNode / replaceText / hot.text 共用。 */
+export function notifyTextContent(text: string): void {
+  if (text) textContentReporter?.(text);
+}
+
 export function createTextNode(value: string): NodeMirror {
   const ops = getOps();
   const id = ops.createNode(NODE_TYPE.text);
   ops.setText(id, value);
+  notifyTextContent(value);
   return decorateNativeNode({
     id,
     type: NODE_TYPE.text,
@@ -453,6 +469,7 @@ export function createCommentNode(data = ""): NodeMirror {
 export function replaceText(node: NodeMirror, value: string): void {
   getOps().replaceText(node.id, value);
   node.text = value;
+  notifyTextContent(value);
   treeMutated();
 }
 
