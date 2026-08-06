@@ -9,6 +9,7 @@ import {
   focusNode,
   getFocused,
   handleFrame,
+  hasTextSelectionPointerCapture,
   resetInput,
   setInputRoot,
 } from "../framework/src/input.ts";
@@ -19,6 +20,8 @@ import {
   __resetTouches,
   __setTouches,
 } from "../framework/src/touch.ts";
+import { registerSelectable } from "../framework/src/host-input.ts";
+import { createTextSelectionHandler } from "../framework/src/text-selection.ts";
 import type { NodeMirror } from "../framework/src/renderer.ts";
 import { BTN, NODE_TYPE, ROOT_ID } from "../contracts/spec/spec.ts";
 
@@ -124,6 +127,35 @@ describe("desktop pointer contact → onPress", () => {
     handleFrame(BTN.CIRCLE); // press
     handleFrame(0); // release over same target
     expect(presses).toBe(1);
+  });
+
+  test("selectable text inside a button does not swallow the button press", () => {
+    // 回归：按钮内 Text 默认注册 selectable，按下文字区时会设置
+    // selectableCapture；真实指针分支必须仍把 press 交给按钮，
+    // 只有拖拽选择（dragged）才抑制。
+    let presses = 0;
+    const button = mk(5, root, {
+      focusable: true,
+      focusKind: "action",
+      onPress: () => {
+        presses += 1;
+      },
+    });
+    const label = mk(4, button, { type: NODE_TYPE.text });
+    registerSelectable(label, createTextSelectionHandler(label));
+    host.hitResult = label.id; // hitTest 命中文字，按钮是可聚焦祖先
+    try {
+      __setTouches([__packTouchDesktop(60, 40)]);
+      handleFrame(BTN.CIRCLE); // press on the label inside the button
+      // 前提必须成立：按下帧确实捕获了文字（否则本测试退化成普通 press 测试）
+      expect(hasTextSelectionPointerCapture()).toBe(true);
+      handleFrame(0); // release without dragging
+      expect(presses).toBe(1);
+      expect(hasTextSelectionPointerCapture()).toBe(false);
+    } finally {
+      // 断言失败也释放注册，避免 selectable pump 泄漏到后续测试文件
+      registerSelectable(label, null);
+    }
   });
 
   test("desktop hover does not focus editable controls before a click", () => {

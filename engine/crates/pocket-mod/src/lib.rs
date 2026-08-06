@@ -97,8 +97,12 @@ impl Guest {
         self.ctx.with(|ctx| -> Result<()> {
             let frame: Option<Function> = ctx.globals().get("frame").ok();
             if let Some(frame) = frame {
+                // Pass u32 bit patterns as f64: rquickjs' IntoJs for u32
+                // prefers an i32 Integer, so any word with bit 31 set would
+                // arrive negative. The current button/analog layouts stay
+                // below 2^31, but f64 keeps every u32 exact regardless.
                 frame
-                    .call::<_, ()>((buttons, analog))
+                    .call::<_, ()>((buttons as f64, analog as f64))
                     .catch(&ctx)
                     .map_err(|e| anyhow!("pocket-mod: frame() threw: {e}"))?;
             }
@@ -123,11 +127,16 @@ impl Guest {
                 let arr = rquickjs::Array::new(ctx.clone())
                     .map_err(|e| anyhow!("pocket-mod: allocating touch array: {e}"))?;
                 for (i, t) in touches.iter().enumerate() {
-                    arr.set(i, *t)
+                    // Write u32 touch words as f64: rquickjs' IntoJs for u32
+                    // prefers an i32 Integer, so words with bit 31 set (wide
+                    // touches, desktop pointer markers) arrive as negative
+                    // numbers and get dropped by the guest's unsigned check.
+                    // f64 holds every u32 exactly, preserving the bit pattern.
+                    arr.set(i, *t as f64)
                         .map_err(|e| anyhow!("pocket-mod: setting touch {i}: {e}"))?;
                 }
                 frame
-                    .call::<_, ()>((buttons, analog, arr))
+                    .call::<_, ()>((buttons as f64, analog as f64, arr))
                     .catch(&ctx)
                     .map_err(|e| anyhow!("pocket-mod: frame() threw: {e}"))?;
             }
@@ -320,6 +329,27 @@ mod tests {
             .unwrap();
         let res: String = g.with(|ctx| ctx.globals().get("res").unwrap());
         assert_eq!(res, "0:0:-1");
+    }
+
+    #[test]
+    fn frame_carries_high_bit_touch_words_unsigned() {
+        // Desktop pointer marker (bit 31..30 = 11) sits above i32::MAX. If it
+        // were truncated to a signed i32 the guest would drop it as an invalid
+        // negative word; the bridge must deliver the unsigned bit pattern.
+        let g = Guest::new().unwrap();
+        g.eval(
+            "boot",
+            "globalThis.res = ''; \
+             globalThis.frame = (b, a, t) => { \
+               globalThis.res = 'w:' + (t && t[0] !== undefined ? t[0] : -1); \
+             };",
+        )
+        .unwrap();
+        let marker = 0xc000_0000u32 | (80u32 << 15) | 120u32;
+        g.frame_with_touches(0, pocketjs_core::spec::ANALOG_CENTER, &[marker])
+            .unwrap();
+        let res: String = g.with(|ctx| ctx.globals().get("res").unwrap());
+        assert_eq!(res, format!("w:{marker}"));
     }
 
     #[test]
