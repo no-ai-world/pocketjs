@@ -29,7 +29,7 @@ use glam::Vec2;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowId, WindowLevel};
+use winit::window::{Icon, Window, WindowId, WindowLevel};
 
 use pocket3d::app::pick_alpha_mode;
 use pocket3d::camera::Camera;
@@ -95,6 +95,10 @@ pub struct WidgetConfig {
     /// `ime_events` stream; the game reports its caret rect through
     /// `ime_cursor_area` so candidate windows dock next to the text.
     pub ime: bool,
+    /// Optional window icon (title bar / taskbar). The desktop launchers
+    /// decode a user-supplied `.ico` and pass it here; `None` keeps the
+    /// platform default icon.
+    pub icon: Option<Icon>,
 }
 
 impl Default for WidgetConfig {
@@ -111,6 +115,7 @@ impl Default for WidgetConfig {
             min_size: (160, 120),
             max_size: None,
             ime: false,
+            icon: None,
         }
     }
 }
@@ -423,6 +428,9 @@ impl<D: Driver> WidgetApp<D> {
             } else {
                 WindowLevel::Normal
             });
+        if let Some(icon) = &self.config.icon {
+            attrs = attrs.with_window_icon(Some(icon.clone()));
+        }
         if self.config.resizable {
             attrs = attrs.with_min_inner_size(winit::dpi::LogicalSize::new(
                 self.config.min_size.0,

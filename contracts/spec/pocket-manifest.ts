@@ -45,6 +45,12 @@ export interface PocketManifestV2 {
   readonly title: string;
   readonly version: string;
   /**
+   * Optional `.ico` icon path for desktop launchers (relative to the
+   * project root, `.ico` only). Pure launcher input — it never enters the
+   * build plan, so plan hashes stay deterministic.
+   */
+  readonly icon?: string;
+  /**
    * Execution classes this package ships as; omitted means ["guest"].
    * Declaring "aot" states that the entry compiles under an AOT family
    * (Pocket Vapor/Static) whose admission is compile-time derived demands
@@ -126,6 +132,13 @@ export const pocketManifestV2Schema = {
     version: {
       type: "string",
       pattern: "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$",
+    },
+    icon: {
+      type: "string",
+      minLength: 1,
+      // Same shape rules as `app.entry`: relative, no `..` segments, no
+      // backslashes — but the extension is `.ico` (desktop launcher icons).
+      pattern: "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+\\.ico$",
     },
     execution: {
       type: "object",

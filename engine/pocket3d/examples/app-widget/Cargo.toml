@@ -9,3 +9,8 @@ description = "The generic PocketJS desktop App Shell for arbitrary app bundles"
 [dependencies]
 anyhow = { workspace = true }
 note-widget = { path = "../note-widget" }
+
+[build-dependencies]
+# Embeds the launcher-supplied .ico (POCKETJS_ICON) as RT_ICON resources;
+# app-widget builds as its own binary and needs its own resource tool.
+winresource = "0.1"

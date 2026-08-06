@@ -1142,6 +1142,8 @@ struct Args {
     pak: Option<PathBuf>,
     plan: Option<PathBuf>,
     file: Option<PathBuf>,
+    /// Launcher-supplied `.ico` for the window icon (and exe resource).
+    icon: Option<PathBuf>,
     size: (u32, u32),
     size_overrides: (bool, bool),
     density: u32,
@@ -1317,6 +1319,7 @@ fn parse_args() -> Result<Args> {
         pak: None,
         plan: None,
         file: None,
+        icon: None,
         size: (420, 560),
         size_overrides: (false, false),
         density: 2,
@@ -1352,6 +1355,7 @@ fn parse_args() -> Result<Args> {
             "--pak" => args.pak = Some(PathBuf::from(val("--pak")?)),
             "--plan" => args.plan = Some(PathBuf::from(val("--plan")?)),
             "--file" => args.file = Some(PathBuf::from(val("--file")?)),
+            "--icon" => args.icon = Some(PathBuf::from(val("--icon")?)),
             "--width" => {
                 args.size.0 = val("--width")?.parse()?;
                 args.size_overrides.0 = true;
@@ -1553,7 +1557,26 @@ fn boot(args: &Args) -> Result<(Guest, UiSurface)> {
     Ok((guest, surface))
 }
 
+/// Decode a launcher-supplied `.ico` into a winit window icon.
+///
+/// The launcher (`tools/desktop-icon.ts`) validates the file before passing
+/// `--icon`, so a failure here is explicit — the window never silently
+/// falls back to the system default once an icon was requested.
+fn load_window_icon(icon: Option<PathBuf>) -> Result<Option<winit::window::Icon>> {
+    let Some(path) = icon else {
+        return Ok(None);
+    };
+    let rgba = image::open(&path)
+        .with_context(|| format!("decoding window icon {}", path.display()))?
+        .to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let icon = winit::window::Icon::from_rgba(rgba.into_raw(), width, height)
+        .with_context(|| format!("building window icon from {}", path.display()))?;
+    Ok(Some(icon))
+}
+
 fn run_with_args(mut args: Args) -> Result<()> {
+    let window_icon = load_window_icon(args.icon.take())?;
     let (guest, surface) = boot(&args)?;
     let atlases = cjk::CjkAtlases::from_pak(&std::fs::read(resolve_asset(
         args.pak.clone(),
@@ -1602,6 +1625,7 @@ fn run_with_args(mut args: Args) -> Result<()> {
                 min_size: args.min_size.unwrap_or(DEFAULT_MIN_SIZE),
                 max_size: args.max_size.or(Some(DEFAULT_MAX_SIZE)),
                 ime: true,
+                icon: window_icon.clone(),
                 ..Default::default()
             },
             game,
@@ -1619,6 +1643,7 @@ fn run_with_args(mut args: Args) -> Result<()> {
                 min_size: args.min_size.unwrap_or(DEFAULT_MIN_SIZE),
                 max_size: args.max_size.or(Some(DEFAULT_MAX_SIZE)),
                 ime: true,
+                icon: window_icon,
                 ..Default::default()
             },
             game,

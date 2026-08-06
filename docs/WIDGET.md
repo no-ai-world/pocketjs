@@ -160,6 +160,16 @@ one `render_words_scaled` pass on dirty frames. It exercises everything the
   Launchers intersect dynamic manifest `min`/`max` bounds with the selected
   target range and pass them to the native window; manifests containing both
   `fixed` and `dynamic` variants follow the target's resolved variant.
+- **Per-app icons, `.ico` only.** `bun run app-widget` / `bun run note`
+  accept `--icon <path.ico>` (CLI wins) or the manifest's top-level `icon`
+  (relative to the project root); with neither, no icon is embedded or set —
+  there is no hardcoded default. The `.ico` is validated (ICONDIR magic +
+  entry bounds), embedded into the exe as RT_ICON/RT_GROUP_ICON resources
+  via `POCKETJS_ICON` during the cargo build, and passed to the binary as
+  `--icon` for the per-app window icon. The shared exe's embedded icon is
+  the last built app's; per-app visual differences come from the runtime
+  window icon. Icons are pure launcher input — they never enter the build
+  plan, so plan hashes stay deterministic.
 - **Pointer paths split by chrome.** Note chrome keeps the historical svc
   `{t:"mouse"}` bridge for the markdown editor. A cursor leaving the native
   window emits shell `{t:"mouse_leave"}`; it clears hover focus but preserves

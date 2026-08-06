@@ -18,6 +18,7 @@ import {
   validateAndResolveBuildPlan,
 } from "../framework/src/manifest/resolve.ts";
 import { assertDesktopTargetPlatform } from "./desktop-target.ts";
+import { resolveIconSource, validateIcoFile } from "./desktop-icon.ts";
 import {
   assertNoDesktopFlags,
   hasDesktopFlag,
@@ -26,9 +27,10 @@ import {
 } from "./desktop-args.ts";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const parsedArgs = parseDesktopArgs(process.argv.slice(2), ["--target", "--title"]);
+const parsedArgs = parseDesktopArgs(process.argv.slice(2), ["--target", "--title", "--icon"]);
 const targetOverride = parsedArgs.ownedValues.get("--target");
 const title = parsedArgs.ownedValues.get("--title");
+const iconFlag = parsedArgs.ownedValues.get("--icon");
 const appSelection = takeDesktopPositional(parsedArgs.pass);
 const appName = appSelection.value ?? "form";
 const pass = appSelection.pass;
@@ -54,6 +56,7 @@ assertNoDesktopFlags(pass, [
   "--pak",
   "--plan",
   "--title",
+  "--icon",
   "--fixed",
   "--min-size",
   "--max-size",
@@ -81,6 +84,8 @@ if (!resolution.ok) {
 }
 
 const output = String(manifest.app?.output ?? `${appName}-main`);
+const iconPath = resolveIconSource(iconFlag, manifest.icon, root);
+if (iconPath) validateIcoFile(iconPath);
 const dynamicBounds = resolveDynamicViewportBounds(manifest, POCKET_TARGETS[target]);
 const usesFixedViewport = dynamicBounds === null;
 const planPath = join(root, ".pocket/desktop-app", `${output}.plan.json`);
@@ -89,7 +94,14 @@ await Bun.write(planPath, JSON.stringify(resolution.plan, null, 2) + "\n");
 
 const engineRoot = join(root, "engine");
 await $`bun tools/build.ts --plan=${planPath} --project-root=${root}`.cwd(root);
-await $`cargo build --release -p app-widget`.cwd(engineRoot);
+const buildEnv = { ...process.env };
+if (iconPath) {
+  buildEnv.POCKETJS_ICON = iconPath;
+} else {
+  // 无图标 = 不嵌入：即使环境里残留全局 POCKETJS_ICON，启动器也不得放行。
+  delete buildEnv.POCKETJS_ICON;
+}
+await $`cargo build --release -p app-widget`.cwd(engineRoot).env(buildEnv);
 
 const binName = platform() === "win32" ? "app-widget.exe" : "app-widget";
 const bin = join(engineRoot, "target/release", binName);
@@ -104,6 +116,7 @@ const env = {
 
 const winTitle = title ?? String(manifest.title ?? output);
 const launchArgs = ["--plan", planPath, ...pass];
+if (iconPath) launchArgs.push("--icon", iconPath);
 const planWidth = String(resolution.plan.viewport.logical[0]);
 const planHeight = String(resolution.plan.viewport.logical[1]);
 if (usesFixedViewport) {

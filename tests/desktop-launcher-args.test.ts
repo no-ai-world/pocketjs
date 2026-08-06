@@ -72,6 +72,31 @@ describe("desktop launcher arguments", () => {
     );
   });
 
+  test("--icon is consumed as a wrapper-owned flag", () => {
+    const parsed = parseDesktopArgs(
+      ["--icon", "assets/app.ico", "--target", "windows-app"],
+      ["--target", "--icon"],
+    );
+    expect(parsed.ownedValues.get("--icon")).toBe("assets/app.ico");
+    expect(parsed.pass).toEqual([]);
+    expect(() => assertNoDesktopFlags(parsed.pass, ["--icon"])).not.toThrow();
+  });
+
+  test("--icon after the separator is not wrapper-owned", () => {
+    const parsed = parseDesktopArgs(["--", "--icon", "x.ico"], ["--icon"]);
+    expect(parsed.ownedValues.has("--icon")).toBe(false);
+    expect(parsed.pass).toEqual(["--icon", "x.ico"]);
+    expect(() => assertNoDesktopFlags(parsed.pass, ["--icon"])).toThrow(
+      "launcher-controlled flag",
+    );
+  });
+
+  test("--icon requires a value", () => {
+    expect(() => parseDesktopArgs(["--icon"], ["--icon"])).toThrow(
+      "--icon needs a value",
+    );
+  });
+
   test("launchers pass POCKETJS_DIST to the native binary", () => {
     // dist 是运行期输入，必须由 launcher 显式传给原生二进制（构建到哪、加载哪）。
     // 回归保护：若 launcher 再漏传 POCKETJS_DIST，二进制将退回 cwd 的 ./dist，

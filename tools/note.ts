@@ -29,14 +29,16 @@ import {
   validateAndResolveBuildPlan,
 } from "../framework/src/manifest/resolve.ts";
 import { assertDesktopTargetPlatform } from "./desktop-target.ts";
+import { resolveIconSource, validateIcoFile } from "./desktop-icon.ts";
 import {
   assertNoDesktopFlags,
   parseDesktopArgs,
 } from "./desktop-args.ts";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const parsedArgs = parseDesktopArgs(process.argv.slice(2), ["--target"], ["--proof"]);
+const parsedArgs = parseDesktopArgs(process.argv.slice(2), ["--target", "--icon"], ["--proof"]);
 const targetOverride = parsedArgs.ownedValues.get("--target");
+const iconFlag = parsedArgs.ownedValues.get("--icon");
 const proof = parsedArgs.ownedFlags.has("--proof");
 const pass = parsedArgs.pass;
 assertNoDesktopFlags(pass, [
@@ -48,6 +50,7 @@ assertNoDesktopFlags(pass, [
   "--pak",
   "--plan",
   "--title",
+  "--icon",
   "--fixed",
   "--min-size",
   "--max-size",
@@ -89,6 +92,8 @@ if (!resolution.ok) {
   );
 }
 const dynamicBounds = resolveDynamicViewportBounds(manifest, POCKET_TARGETS[target]);
+const iconPath = resolveIconSource(iconFlag, manifest.icon, root);
+if (iconPath) validateIcoFile(iconPath);
 const boundArgs = dynamicBounds
   ? [
       "--min-size",
@@ -99,12 +104,20 @@ const boundArgs = dynamicBounds
   : [];
 const planPath = join(root, ".pocket/desktop-widget/note-main.plan.json");
 const launchArgs = ["--plan", planPath, ...boundArgs, ...pass];
+if (iconPath) launchArgs.push("--icon", iconPath);
 mkdirSync(dirname(planPath), { recursive: true });
 await Bun.write(planPath, JSON.stringify(resolution.plan, null, 2) + "\n");
 
 const engineRoot = join(root, "engine");
 await $`bun tools/build.ts --plan=${planPath} --project-root=${root}`.cwd(root);
-await $`cargo build --release -p note-widget`.cwd(engineRoot);
+const buildEnv = { ...process.env };
+if (iconPath) {
+  buildEnv.POCKETJS_ICON = iconPath;
+} else {
+  // 无图标 = 不嵌入：即使环境里残留全局 POCKETJS_ICON，启动器也不得放行。
+  delete buildEnv.POCKETJS_ICON;
+}
+await $`cargo build --release -p note-widget`.cwd(engineRoot).env(buildEnv);
 
 const binName = platform() === "win32" ? "note-widget.exe" : "note-widget";
 const bin = join(engineRoot, "target/release", binName);

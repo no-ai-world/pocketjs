@@ -13,6 +13,10 @@ name = "note_widget"
 name = "note-widget"
 path = "src/main.rs"
 
+[build-dependencies]
+# Embeds the launcher-supplied .ico (POCKETJS_ICON) as RT_ICON resources.
+winresource = "0.1"
+
 [dependencies]
 pocket3d = { workspace = true }
 pocket-mod = { workspace = true }
@@ -28,6 +32,9 @@ serde_json = { workspace = true }
 ab_glyph = { workspace = true }
 memmap2 = { workspace = true }
 arboard = { workspace = true }
+# Window-icon decode: .ico inputs only (PNG/BMP cover the two ICONDIR
+# entry encodings); never a conversion chain.
+image = { version = "0.25", default-features = false, features = ["ico", "png", "bmp"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
