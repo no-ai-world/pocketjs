@@ -99,6 +99,10 @@ pub struct WidgetConfig {
     /// decode a user-supplied `.ico` and pass it here; `None` keeps the
     /// platform default icon.
     pub icon: Option<Icon>,
+    /// Optional system tray (Windows/macOS). With a tray, closing the window
+    /// hides to the tray instead of quitting; the tray owns restore + quit.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pub tray: Option<crate::tray::TrayConfig>,
 }
 
 impl Default for WidgetConfig {
@@ -116,6 +120,8 @@ impl Default for WidgetConfig {
             max_size: None,
             ime: false,
             icon: None,
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            tray: None,
         }
     }
 }
@@ -195,6 +201,13 @@ pub trait FlatWidget {
     fn wants_exit(&self) -> bool {
         false
     }
+
+    /// Consume a product-requested close (the guest asked to quit). With a
+    /// tray the shell hides to it; without one it exits. Always false on
+    /// Linux, where the tray concept does not exist.
+    fn take_close_request(&mut self) -> bool {
+        false
+    }
 }
 
 /// Run a 3D widget (scene + camera + demand rendering).
@@ -234,6 +247,11 @@ trait Driver {
     fn resize_at(&mut self, cursor: Vec2) -> bool;
     fn ime_cursor_area(&mut self) -> Option<(f32, f32, f32, f32)>;
     fn wants_exit(&self) -> bool;
+    /// Product-requested close (default: none). The 3D shape has no close
+    /// request concept; flat products override it.
+    fn take_close_request(&mut self) -> bool {
+        false
+    }
 }
 
 struct SceneDriver<G: WidgetGame> {
@@ -315,6 +333,9 @@ impl<G: FlatWidget> Driver for FlatDriver<G> {
     }
     fn wants_exit(&self) -> bool {
         self.game.wants_exit()
+    }
+    fn take_close_request(&mut self) -> bool {
+        self.game.take_close_request()
     }
 }
 
@@ -400,6 +421,10 @@ struct WindowState {
     /// The shell tracks the drag itself — macOS offers no OS resize
     /// session for borderless windows.
     resizing: Option<(Vec2, (u32, u32))>,
+    /// Live tray icon; must outlive the loop (Drop removes it from the
+    /// platform tray).
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    tray: Option<crate::tray::TrayState>,
 }
 
 struct WidgetApp<D: Driver> {
@@ -444,6 +469,14 @@ impl<D: Driver> WidgetApp<D> {
         if self.config.ime {
             window.set_ime_allowed(true);
         }
+        // Tray creation happens on the event-loop thread (required by
+        // tray-icon on both platforms). A --tray that cannot materialize
+        // aborts boot — explicit request, explicit failure.
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        let tray = match &self.config.tray {
+            Some(config) => Some(crate::tray::TrayState::create(config)?),
+            None => None,
+        };
         let instance = Gpu::new_instance_for_widgets();
         let surface = instance.create_surface(window.clone())?;
         let gpu = Gpu::from_instance_for_surface_with_power_preference(
@@ -502,6 +535,8 @@ impl<D: Driver> WidgetApp<D> {
             occluded: false,
             ime_area: None,
             resizing: None,
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            tray,
         })
     }
 
@@ -536,6 +571,47 @@ impl<D: Driver> WidgetApp<D> {
             state.next_tick = now + tick_interval;
         }
         if self.driver.wants_exit() {
+            event_loop.exit();
+            return;
+        }
+
+        // Tray actions: restore/hide via the tray (Windows and macOS:
+        // left-click toggle, plus the macOS Show/Hide menu item). Quit is
+        // the tray's real exit.
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        if state.tray.is_some() {
+            for action in crate::tray::poll_actions() {
+                match action {
+                    crate::tray::TrayAction::ToggleVisibility => {
+                        // Windows/macOS always report Some; unwrap_or(false)
+                        // only guards platforms where visibility is
+                        // unknowable (X11), which cannot reach here because
+                        // the tray module is cfg'd to Windows/macOS.
+                        let visible = !state.window.is_visible().unwrap_or(false);
+                        state.window.set_visible(visible);
+                        if visible {
+                            // Repaint + focus on restore; the retained
+                            // frame may predate the hide.
+                            state.window.focus_window();
+                            state.render_pending = true;
+                        }
+                    }
+                    crate::tray::TrayAction::Quit => {
+                        event_loop.exit();
+                        return;
+                    }
+                }
+            }
+        }
+
+        // A product close request hides under a tray (the tray keeps the
+        // app alive and owns restore) and exits without one.
+        if self.driver.take_close_request() {
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            if state.tray.is_some() {
+                state.window.set_visible(false);
+                return;
+            }
             event_loop.exit();
             return;
         }
@@ -642,7 +718,16 @@ impl<D: Driver> ApplicationHandler for WidgetApp<D> {
             WindowEvent::Focused(false) => {
                 state.resizing = None;
             }
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // With a tray the close button hides to the tray (the tray
+                // owns quit); without one it exits as before.
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                if state.tray.is_some() {
+                    state.window.set_visible(false);
+                    return;
+                }
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => {
                 log::debug!("pocket-widget: Resized {size:?}");
                 state.surface_config.width = size.width.max(1);

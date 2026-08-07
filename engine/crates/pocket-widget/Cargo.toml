@@ -15,3 +15,9 @@ winit = { workspace = true }
 glam = { workspace = true, features = ["std"] }
 anyhow = { workspace = true }
 log = { workspace = true }
+
+# System tray for the widget shell. Target-gated: the workspace's ubuntu
+# `cargo test --workspace` must not compile tray-icon (no GTK system libs
+# on CI).
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+tray-icon = { workspace = true }

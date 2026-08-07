@@ -29,6 +29,9 @@ pub mod embed;
 pub mod parts;
 pub mod pick;
 pub mod shell;
+/// System tray (Windows/macOS only; the module is cfg'd out on Linux).
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub mod tray;
 
 pub use embed::EmbeddedUi;
 pub use parts::{PartMap, PartShape, analog_pack, key_button};

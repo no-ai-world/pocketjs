@@ -380,6 +380,10 @@ struct NoteGame {
     hash: u64,
     dirty: bool,
     exit: bool,
+    /// Guest-requested close (note chrome "Close widget"): the shell hides
+    /// to the tray when one exists and exits without one. The game does not
+    /// know about trays — the decision belongs to the shell.
+    close_request: bool,
     booted: bool,
     /// Last (x, y, primary-down) sent over svc — mouse lines go out on any
     /// change, including press/release without movement.
@@ -446,6 +450,7 @@ impl NoteGame {
             hash: 0,
             dirty: true,
             exit: false,
+            close_request: false,
             booted: false,
             last_mouse: None,
             cursor_present: false,
@@ -721,12 +726,6 @@ impl FlatWidget for NoteGame {
             }
         }
 
-        // Command/Control+Q/W quit (the widget has no titlebar close button).
-        if input.shortcut_down()
-            && (input.key_pressed(KeyCode::KeyQ) || input.key_pressed(KeyCode::KeyW))
-        {
-            self.exit = true;
-        }
         // Command/Control+Z/A/C/X/V → guest editing chords (chars are
         // suppressed under the shortcut modifier).
         if input.shortcut_down() && input.key_pressed(KeyCode::KeyZ) {
@@ -942,8 +941,9 @@ impl FlatWidget for NoteGame {
         }
         self.surface.tick();
 
-        // Guest → host intents: only note chrome owns note-local messages;
-        // app-widget forwards those names to the companion as ordinary business data.
+        // Guest → host intents: note chrome owns note-local messages
+        // (save/menu); quit is the framework close request for both chrome
+        // shapes, so an app's in-app close button hides to the tray too.
         for line in self.surface.svc_drain() {
             match serde_json::from_str::<serde_json::Value>(&line) {
                 Ok(v) => match intent_type(&v) {
@@ -951,7 +951,7 @@ impl FlatWidget for NoteGame {
                         Some(text) => self.save(text),
                         None => log::warn!("note-widget: invalid save intent"),
                     },
-                    Some("quit") if self.note_chrome => self.exit = true,
+                    Some("quit") => self.close_request = true,
                     Some("menu") if self.note_chrome => {
                         match v.get("open").and_then(|field| field.as_bool()) {
                             Some(open) => self.guest_menu_open = open,
@@ -1071,6 +1071,10 @@ impl FlatWidget for NoteGame {
     fn wants_exit(&self) -> bool {
         self.exit
     }
+
+    fn take_close_request(&mut self) -> bool {
+        std::mem::take(&mut self.close_request)
+    }
 }
 
 /// FNV-1a 64 over the DrawList words (embed.rs's dirty signal).
@@ -1144,6 +1148,10 @@ struct Args {
     file: Option<PathBuf>,
     /// Launcher-supplied `.ico` for the window icon (and exe resource).
     icon: Option<PathBuf>,
+    /// System tray: close hides to the tray; the tray owns quit + restore.
+    /// Requires `--icon` (validated by `validate_tray_icon`) for
+    /// interactive runs; headless screenshots ignore it.
+    tray: bool,
     size: (u32, u32),
     size_overrides: (bool, bool),
     density: u32,
@@ -1320,6 +1328,7 @@ fn parse_args() -> Result<Args> {
         plan: None,
         file: None,
         icon: None,
+        tray: false,
         size: (420, 560),
         size_overrides: (false, false),
         density: 2,
@@ -1356,6 +1365,7 @@ fn parse_args() -> Result<Args> {
             "--plan" => args.plan = Some(PathBuf::from(val("--plan")?)),
             "--file" => args.file = Some(PathBuf::from(val("--file")?)),
             "--icon" => args.icon = Some(PathBuf::from(val("--icon")?)),
+            "--tray" => args.tray = true,
             "--width" => {
                 args.size.0 = val("--width")?.parse()?;
                 args.size_overrides.0 = true;
@@ -1444,6 +1454,16 @@ fn parse_args() -> Result<Args> {
     apply_plan_defaults(&mut args)?;
     validate_size_bounds(&args)?;
     Ok(args)
+}
+
+/// A tray without an icon cannot exist — reject it before anything boots.
+/// Called for interactive runs only; headless screenshots never create a
+/// tray, so `--tray` is ignored there instead of demanding an icon.
+fn validate_tray_icon(tray: bool, icon: Option<&Path>) -> Result<()> {
+    if tray && icon.is_none() {
+        return Err(anyhow!("--tray wants an icon (pass --icon <path.ico>)"));
+    }
+    Ok(())
 }
 
 /// `<repo>/dist` — POCKETJS_DIST, or ./dist when run from the repo root.
@@ -1557,26 +1577,61 @@ fn boot(args: &Args) -> Result<(Guest, UiSurface)> {
     Ok((guest, surface))
 }
 
-/// Decode a launcher-supplied `.ico` into a winit window icon.
+/// System tray icon edge length. Windows' `CreateIcon` only accepts icons
+/// up to 32×32 (larger RGBA icons make `Shell_NotifyIconW` fail with E_FAIL);
+/// 32px also renders crisply on macOS at both @1x and @2x.
+const TRAY_ICON_SIZE: u32 = 32;
+
+/// Decode a launcher-supplied `.ico` once into the window icon and the
+/// tray-icon RGBA (same pixels, two consumers — never decode twice). The
+/// window keeps the full resolution; the tray gets at most 32×32.
 ///
 /// The launcher (`tools/desktop-icon.ts`) validates the file before passing
 /// `--icon`, so a failure here is explicit — the window never silently
 /// falls back to the system default once an icon was requested.
-fn load_window_icon(icon: Option<PathBuf>) -> Result<Option<winit::window::Icon>> {
+fn load_window_icon(
+    icon: Option<PathBuf>,
+) -> Result<(
+    Option<winit::window::Icon>,
+    Option<(Vec<u8>, u32, u32)>,
+)> {
     let Some(path) = icon else {
-        return Ok(None);
+        return Ok((None, None));
     };
     let rgba = image::open(&path)
         .with_context(|| format!("decoding window icon {}", path.display()))?
         .to_rgba8();
     let (width, height) = rgba.dimensions();
-    let icon = winit::window::Icon::from_rgba(rgba.into_raw(), width, height)
+    let window_icon = winit::window::Icon::from_rgba(rgba.clone().into_raw(), width, height)
         .with_context(|| format!("building window icon from {}", path.display()))?;
-    Ok(Some(icon))
+    // Windows' CreateIcon accepts 16–32 px natively: keep smaller sources
+    // at their native size (upscaling would blur), downscale larger ones
+    // (e.g. a 256×256 bililive.ico) to 32.
+    let tray = if width == height && width <= TRAY_ICON_SIZE {
+        rgba
+    } else {
+        image::imageops::resize(
+            &rgba,
+            TRAY_ICON_SIZE,
+            TRAY_ICON_SIZE,
+            image::imageops::FilterType::Lanczos3,
+        )
+    };
+    let (tray_w, tray_h) = tray.dimensions();
+    Ok((Some(window_icon), Some((tray.into_raw(), tray_w, tray_h))))
 }
 
 fn run_with_args(mut args: Args) -> Result<()> {
-    let window_icon = load_window_icon(args.icon.take())?;
+    // --tray requires --icon, but only for interactive runs: headless
+    // screenshots never create a tray. Validate before decoding the icon
+    // so the error surfaces ahead of any bundle/boot work.
+    if args.screenshot.is_none() {
+        validate_tray_icon(args.tray, args.icon.as_deref())?;
+    }
+    let (window_icon, tray_rgba) = load_window_icon(args.icon.take())?;
+    // Linux builds never create a tray; keep the unused decode explicit.
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let _ = tray_rgba;
     let (guest, surface) = boot(&args)?;
     let atlases = cjk::CjkAtlases::from_pak(&std::fs::read(resolve_asset(
         args.pak.clone(),
@@ -1592,6 +1647,22 @@ fn run_with_args(mut args: Args) -> Result<()> {
             args.app.clone()
         }
     });
+    // Headless screenshots never create a tray (no event loop to drive it).
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    let tray_config = if args.screenshot.is_none() && args.tray {
+        // validate_tray_icon already guaranteed --icon for interactive runs;
+        // this only unwraps the same invariant without a panic path.
+        let Some((rgba, size, _)) = tray_rgba.clone() else {
+            return Err(anyhow!("--tray requires --icon"));
+        };
+        Some(pocket_widget::tray::TrayConfig {
+            tooltip: title.clone(),
+            icon_rgba: rgba,
+            icon_size: size,
+        })
+    } else {
+        None
+    };
     let mut game = NoteGame::new(
         surface,
         guest,
@@ -1626,6 +1697,8 @@ fn run_with_args(mut args: Args) -> Result<()> {
                 max_size: args.max_size.or(Some(DEFAULT_MAX_SIZE)),
                 ime: true,
                 icon: window_icon.clone(),
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                tray: tray_config.clone(),
                 ..Default::default()
             },
             game,
@@ -1644,6 +1717,8 @@ fn run_with_args(mut args: Args) -> Result<()> {
                 max_size: args.max_size.or(Some(DEFAULT_MAX_SIZE)),
                 ime: true,
                 icon: window_icon,
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                tray: tray_config,
                 ..Default::default()
             },
             game,
@@ -1730,8 +1805,9 @@ fn headless(mut game: NoteGame, args: Args, out: &std::path::Path) -> Result<()>
 mod tests {
     use super::{
         BTN_CIRCLE, CaretRect, ChromeMode, PointerClick, PointerPulse, ShellClick, host_identity,
-        intent_caret, intent_text, intent_type, last_mouse_release, pack_pointer_position,
-        plan_default_size, pointer_buttons, validate_resolved_plan,
+        intent_caret, intent_text, intent_type, last_mouse_release, load_window_icon,
+        pack_pointer_position, plan_default_size, pointer_buttons, validate_resolved_plan,
+        validate_tray_icon,
     };
 
     #[test]
@@ -1951,6 +2027,56 @@ mod tests {
         pulse.cancel_held();
         assert_eq!(pulse.next(false, None, true), (false, Some(click.release)));
         assert_eq!(pulse.next(false, None, false), (false, None));
+    }
+
+    #[test]
+    fn tray_icon_is_32px_and_window_icon_survives() {
+        // Windows' CreateIcon rejects >32×32 tray icons (E_FAIL on
+        // Shell_NotifyIconW), so the tray gets a 32×32 downscale while the
+        // window keeps the full-resolution icon.
+        let dir = std::env::temp_dir().join(format!(
+            "pocket-note-tray-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tray-test.ico");
+        let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([200u8, 30, 30, 255]));
+        img.save_with_format(&path, image::ImageFormat::Ico).unwrap();
+        let (window_icon, tray) = load_window_icon(Some(path)).unwrap();
+        assert!(window_icon.is_some());
+        let (rgba, size, _) = tray.unwrap();
+        assert_eq!(size, 32);
+        assert_eq!(rgba.len(), 32 * 32 * 4);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn small_icon_keeps_native_tray_size() {
+        // A 16×16 source fits CreateIcon natively — it must not be
+        // upscaled (which would blur) but passed through unchanged.
+        let dir = std::env::temp_dir().join(format!(
+            "pocket-note-tray-small-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tray-small.ico");
+        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([30u8, 200, 30, 255]));
+        img.save_with_format(&path, image::ImageFormat::Ico).unwrap();
+        let (_window_icon, tray) = load_window_icon(Some(path)).unwrap();
+        let (rgba, size, _) = tray.unwrap();
+        assert_eq!(size, 16);
+        assert_eq!(rgba.len(), 16 * 16 * 4);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tray_wants_an_icon_when_enabled() {
+        // An explicit --tray without --icon must fail before boot.
+        assert!(validate_tray_icon(true, None).is_err());
+        let path = std::path::Path::new("icon.ico");
+        assert!(validate_tray_icon(true, Some(path)).is_ok());
+        assert!(validate_tray_icon(false, None).is_ok());
+        assert!(validate_tray_icon(false, Some(path)).is_ok());
     }
 
     #[test]
