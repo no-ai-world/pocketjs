@@ -438,15 +438,18 @@ fn fill_color_at(fill: &Fill, x0: f32, y0: f32, x1: f32, y1: f32, sx0: i32, sy: 
 
 // ---- the walker ------------------------------------------------------------------
 
-/// Baked antialiased disc sprites keyed by integer radius — rounded corners
+/// Baked antialiased disc/ring sprites keyed by integer radius — rounded corners
 /// render as four O(1) corner TEX_QUADs + three RECTs instead of per-row
 /// coverage spans (the spans measured ~7 ms/frame of CPU on real PSP
-/// hardware for rounded-heavy screens).
+/// hardware for rounded-heavy screens). Rings (inner_r > 0) carry the same
+/// per-pixel supersampled coverage for rounded borders: a hollow annulus
+/// between r and r - border_width.
 pub struct DiscCache {
-    /// (logical radius px, generation-tagged texture handle). Handles re-validate
-    /// through `tex_resolve` on every use: `free_texture` is allowed to free
-    /// a disc slot (JS misuse), which simply goes stale here and re-bakes.
-    entries: Vec<(u32, i32)>,
+    /// (logical radius px, inner radius px, generation-tagged texture handle).
+    /// Handles re-validate through `tex_resolve` on every use: `free_texture`
+    /// is allowed to free a disc slot (JS misuse), which simply goes stale
+    /// here and re-bakes.
+    entries: Vec<(u32, u32, i32)>,
 }
 
 impl DiscCache {
@@ -461,36 +464,63 @@ impl Default for DiscCache {
     }
 }
 
-/// Get (or bake + upload) the AA disc texture for logical `r_px`. The disc is
-/// a density-scaled 2r x 2r circle, supersampled 4x4, white RGB with coverage alpha
-/// (PSM_8888), padded to pow2 — corners sample their quadrant and modulate
-/// by the fill color, which matches the old span math's scale_alpha exactly
-/// up to AA rounding.
+/// Get (or bake + upload) the AA disc texture for logical `r_px`. With
+/// `inner_r_px == 0` it is a solid disc; with `inner_r_px > 0` it is the
+/// hollow annulus between r and r - inner_r (the rounded-border ring). The
+/// texture is a density-scaled 2r x 2r shape, supersampled 4x4, white RGB with
+/// coverage alpha (PSM_8888), padded to pow2 — corners sample their quadrant
+/// and modulate by the fill color, which matches the old span math's
+/// scale_alpha exactly up to AA rounding.
+///
+/// Rings bake at an extra `RING_AA_OVERSAMPLE` (4x) resolution and flip the
+/// `linear` flag: a 1px stroke is only a couple of texels wide, and nearest
+/// sampling then quantizes its rim to whole-texel steps (edge drift and
+/// blocky steps on a hairline arc). Bilinear filtering over the supersampled
+/// coverage recovers a smooth, position-accurate rim on both the CPU raster
+/// and the wgpu host, matching browser-level arc AA.
+const RING_AA_OVERSAMPLE: u32 = 4;
+
 fn disc_texture(
     cache: &mut DiscCache,
     textures: &mut Vec<crate::TexSlot>,
     tex_free: &mut Vec<u32>,
     r_px: u32,
+    inner_r_px: u32,
     raster_density: u32,
 ) -> Option<(u32, u32)> {
-    let raster_radius = r_px.checked_mul(raster_density)?;
+    let is_ring = inner_r_px > 0;
+    let raster_radius = r_px.checked_mul(raster_density)?.checked_mul(if is_ring { RING_AA_OVERSAMPLE } else { 1 })?;
     let size = 2u32.checked_mul(raster_radius)?;
     let dim = pow2_at_least(size);
     if dim > spec::TEX_MAX_DIM {
         return None;
     }
-    if let Some(&(_, handle)) = cache.entries.iter().find(|&&(r, _)| r == r_px) {
+    if let Some(&(_, _, handle)) = cache
+        .entries
+        .iter()
+        .find(|&&(r, inner, _)| r == r_px && inner == inner_r_px)
+    {
         // Re-validate: a freed disc slot (free_texture on our handle) goes
         // stale here; drop the entry and re-bake below.
         if crate::tex_resolve(textures, handle).is_some() {
             return Some((handle as u32, dim));
         }
-        cache.entries.retain(|&(r, _)| r != r_px);
+        cache
+            .entries
+            .retain(|&(r, inner, _)| !(r == r_px && inner == inner_r_px));
     }
     let byte_len = (dim * dim * 4) as usize;
     let mut px = alloc::vec![0u8; byte_len];
     let c = raster_radius as f32; // disc center in raster pixels
     let rr = c * c;
+    // Ring hole: every supersample strictly outside the inner circle is empty
+    // (inner_r_px == 0 makes inner_rr = 0 and the `d2 > inner_rr` clause always
+    // true — no sample ever lands exactly on the integer disc center — so the
+    // bake stays a solid disc).
+    let inner_radius = inner_r_px
+        .saturating_mul(raster_density)
+        .saturating_mul(if is_ring { RING_AA_OVERSAMPLE } else { 1 });
+    let inner_rr = (inner_radius as f32) * (inner_radius as f32);
     for y in 0..size {
         for x in 0..size {
             let mut covered = 0u32;
@@ -500,7 +530,8 @@ fn disc_texture(
                     let fy = y as f32 + (sy as f32 + 0.5) / 4.0;
                     let dx = fx - c;
                     let dy = fy - c;
-                    if dx * dx + dy * dy <= rr {
+                    let d2 = dx * dx + dy * dy;
+                    if d2 <= rr && d2 > inner_rr {
                         covered += 1;
                     }
                 }
@@ -528,14 +559,16 @@ fn disc_texture(
             h: dim,
             psm: spec::psm::PSM_8888,
             palette: None,
-            linear: false,
+            // Rings carry smooth coverage alpha: bilinear resampling keeps
+            // the hairline rim position-accurate under the quad's UV scale.
+            linear: is_ring,
             revision: 0,
         },
     );
     if handle < 0 {
         return None;
     }
-    cache.entries.push((r_px, handle));
+    cache.entries.push((r_px, inner_r_px, handle));
     Some((handle as u32, dim))
 }
 
@@ -2260,7 +2293,7 @@ impl<'a> Walker<'a> {
         self.emit_box(dl, &Affine::IDENTITY, x0, y0, x1, y1, fill, clip);
     }
 
-    /// One rounded-corner sprite: an r x r quadrant of the baked disc,
+    /// One rounded-corner sprite: an r x r quadrant of the baked disc/ring,
     /// clipped, with UVs re-interpolated over the visible part.
     #[allow(clippy::too_many_arguments)]
     fn emit_corner_quad(
@@ -2524,6 +2557,82 @@ impl<'a> Walker<'a> {
         let inner_r = (r - bw).max(0.0);
         let has_inner = inner_sx1 > inner_sx0 && inner_sy1 > inner_sy0;
 
+        // Flat fills: four baked hollow-ring corner sprites + four solid edge
+        // bars — the ring's per-pixel supersampled alpha gives the arc the
+        // same smooth AA as the disc path (and browsers), where the per-row
+        // span path below flattens each arc row to ONE alpha (blocky, and the
+        // visual corner shrinks to ~65% of the design radius). Large radii
+        // and non-flat fills keep the exact span path below.
+        //
+        // Ring geometry follows CSS border semantics, verified against
+        // browser output: border-radius is the stroke's INNER radius, so the
+        // hollow annulus runs (r, r + bw] — the outer rim sits border_width
+        // outside the design radius. The old span path and a naive (r-bw, r]
+        // ring both collapse the corner inward by the border width, which is
+        // very visible on a 1px stroke.
+        if let Fill::Flat(color) = fill {
+            let r_px = roundf(r).max(1.0) as u32;
+            let bw_px = roundf(bw).max(1.0) as u32;
+            let outer_r_px = r_px.saturating_add(bw_px);
+            // Same policy as DISC_MAX_R: recur UI radii cache forever, but an
+            // ANIMATED radius mints a new key every frame (scaling
+            // rounded-full splash) — large radii take the analytic spans.
+            const RING_MAX_R: u32 = 32;
+            if outer_r_px <= RING_MAX_R {
+                if let Some((tex, dim)) = disc_texture(
+                    self.discs,
+                    self.textures,
+                    self.tex_free,
+                    outer_r_px,
+                    r_px,
+                    self.raster_density,
+                ) {
+                    // Quantize the shared outer edges once before splitting
+                    // the ring (same rule as emit_rounded_box: independent
+                    // rounding per piece leaves 1px gaps under scale).
+                    let qx0 = roundf(sx0);
+                    let qy0 = roundf(sy0);
+                    let qx1 = roundf(sx1);
+                    let qy1 = roundf(sy1);
+                    let rf = (outer_r_px as f32)
+                        .min((qx1 - qx0) * 0.5)
+                        .min((qy1 - qy0) * 0.5);
+                    // Narrow controls (w or h < 2*outer) would clip the ring's
+                    // outer rim; the analytic span path below stays the
+                    // fallback for those (same clamp the disc path accepts).
+                    if rf >= outer_r_px as f32 - 0.5 {
+                        let bf = (bw_px as f32).min(rf);
+                        // Quadrant UV layout: each corner quad is rf x rf,
+                        // sampling the baked ring's matching quadrant with the
+                        // ring center (UV du) at the quad's far corner — the
+                        // button's arc center sits at (qx0+r, qy0+r). Edge
+                        // bars tile the straight segments between quads.
+                        let tex_per_log = self.raster_density * RING_AA_OVERSAMPLE;
+                        let du = (outer_r_px * tex_per_log) as f32 / dim as f32;
+                        let corners = [
+                            (qx0, qy0, 0.0, 0.0),           // TL quadrant
+                            (qx1 - rf, qy0, du, 0.0),       // TR
+                            (qx0, qy1 - rf, 0.0, du),       // BL
+                            (qx1 - rf, qy1 - rf, du, du),   // BR
+                        ];
+                        for &(cx, cy, u0, v0) in corners.iter() {
+                            self.emit_corner_quad(dl, tex, cx, cy, rf, u0, v0, du, color, clip);
+                        }
+                        let mid = Fill::Flat(color);
+                        // Four solid edge bars, bf thick: each starts exactly at
+                        // the ring's outer rim (where the corner sprite already
+                        // hit full alpha), so bars and corner sprites tile the
+                        // hollow ring with no gap and no overlap.
+                        self.emit_screen_rect(dl, qx0 + rf, qy0, qx1 - rf, qy0 + bf, mid, clip);   // top
+                        self.emit_screen_rect(dl, qx0 + rf, qy1 - bf, qx1 - rf, qy1, mid, clip);   // bottom
+                        self.emit_screen_rect(dl, qx0, qy0 + rf, qx0 + bf, qy1 - rf, mid, clip);   // left
+                        self.emit_screen_rect(dl, qx1 - bf, qy0 + rf, qx1, qy1 - rf, mid, clip);   // right
+                        return;
+                    }
+                }
+            }
+        }
+
         for py in iy0..iy1 {
             let y_coverage = pixel_interval_coverage(py, sy0, sy1);
             if y_coverage == 0 {
@@ -2643,6 +2752,7 @@ impl<'a> Walker<'a> {
                     self.textures,
                     self.tex_free,
                     r_px,
+                    0, // solid disc
                     self.raster_density,
                 ) {
                     // RECT/TEX_QUAD encode integer x/y plus integer width/height.

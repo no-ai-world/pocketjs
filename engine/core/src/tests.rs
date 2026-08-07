@@ -959,8 +959,12 @@ fn transparent_rounded_border_draws_an_outline_not_square_strips() {
 }
 
 #[test]
-fn opaque_rounded_border_emits_horizontal_hairline_markers() {
-    // Verify opaque rounded-border hairline markers.
+fn opaque_rounded_border_edges_are_integer_quantized_without_hairlines() {
+    // The hollow-ring path quantizes the outer edge once (roundf on the shared
+    // sx0/sy0/sx1/sy1) so top/bottom edge bars land on integer y with no
+    // GRAD_RECT hairline markers needed. The old per-row span path emitted one
+    // DRAW_HAIRLINE_HORIZONTAL marker per horizontal edge to re-snap
+    // fractional placement at fractional-DPI; the ring path replaces that.
     let mut ui = Ui::new();
     let n = ui.create_node(0);
     ui.set_prop(n, spec::prop::WIDTH, 120.0);
@@ -979,9 +983,8 @@ fn opaque_rounded_border_emits_horizontal_hairline_markers() {
     ui.insert_before(spec::ROOT_ID, n, 0);
     ui.tick();
 
-    let markers = ui
-        .draw()
-        .words
+    let words = ui.draw().words.clone();
+    let markers = words
         .windows(6)
         .filter(|op| {
             op[0] == spec::draw_op::GRAD_RECT
@@ -989,7 +992,170 @@ fn opaque_rounded_border_emits_horizontal_hairline_markers() {
                 && op[5] == spec::DRAW_HAIRLINE_HORIZONTAL
         })
         .count();
-    assert_eq!(markers, 2, "one snapped hairline is emitted for each horizontal edge");
+    assert_eq!(
+        markers, 0,
+        "ring-path borders are integer-quantized; no hairline markers"
+    );
+    // The 1px top/bottom edge bars still cover their edge midpoints
+    // (qx0=10, qy0=10, qx1=130, qy1=42, rf=7, bars from qx0+r to qx1-r).
+    let mut covers_top_mid = false;
+    let mut covers_bottom_mid = false;
+    let mut i = 0usize;
+    while i < words.len() {
+        match words[i] {
+            spec::draw_op::RECT => {
+                let (x, y) = decode_xy(words[i + 1]);
+                let (w, h) = decode_wh(words[i + 2]);
+                let covers = |px: i32, py: i32| px >= x && px < x + w && py >= y && py < y + h;
+                covers_top_mid |= covers(70, 10);
+                covers_bottom_mid |= covers(70, 41);
+                i += 4;
+            }
+            spec::draw_op::GRAD_RECT => i += 6,
+            spec::draw_op::TRI => i += 7,
+            spec::draw_op::GLYPH_RUN => i += 3 + 2 * ((words[i + 1] >> 16) as usize),
+            spec::draw_op::TEX_QUAD => i += 9,
+            spec::draw_op::SCISSOR => i += 3,
+            _ => i += 1,
+        }
+    }
+    assert!(covers_top_mid, "top edge bar should cover its midpoint");
+    assert!(covers_bottom_mid, "bottom edge bar should cover its midpoint");
+}
+
+#[test]
+fn rounded_border_bakes_a_hollow_ring_with_aa_gradient() {
+    // The issue's exact repro: a ~40x25 stroked button, radius 10, 1px border.
+    // The hollow ring (outer r=11 = radius+border, inner r=10 = the design
+    // radius, per CSS border semantics) must bake per-pixel supersampled
+    // coverage: outer rim solid, center hollow, and a partial-coverage AA
+    // gradient where the rim crosses a texel — the property the old per-row
+    // span path lacked (each row collapsed to ONE alpha). Rings bake at 4x
+    // oversample (RING_AA_OVERSAMPLE) with the linear flag on, so the
+    // coordinates below are in 4x texel space: center = 11*4, rim at 11*4.
+    let mut ui = Ui::new();
+    let n = ui.create_node(0);
+    ui.set_prop(n, spec::prop::WIDTH, 40.0);
+    ui.set_prop(n, spec::prop::HEIGHT, 25.0);
+    ui.set_prop(
+        n,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
+    ui.set_prop(n, spec::prop::INSET_T, 10.0);
+    ui.set_prop(n, spec::prop::INSET_L, 10.0);
+    ui.set_prop(n, spec::prop::RADIUS, 10.0);
+    ui.set_prop(n, spec::prop::BORDER_COLOR, abgr(99, 102, 241, 255) as f64);
+    ui.set_prop(n, spec::prop::BORDER_WIDTH, 1.0);
+    ui.insert_before(spec::ROOT_ID, n, 0);
+    ui.tick();
+
+    let words = ui.draw().words.clone();
+    let mut tex_quads = 0usize;
+    let mut rects = 0usize;
+    let mut ring = None;
+    let mut i = 0usize;
+    while i < words.len() {
+        match words[i] {
+            spec::draw_op::RECT => {
+                rects += 1;
+                i += 4;
+            }
+            spec::draw_op::TEX_QUAD => {
+                tex_quads += 1;
+                ring = Some(words[i + 1] as i32);
+                i += 9;
+            }
+            spec::draw_op::GRAD_RECT => i += 6,
+            spec::draw_op::TRI => i += 7,
+            spec::draw_op::GLYPH_RUN => i += 3 + 2 * ((words[i + 1] >> 16) as usize),
+            spec::draw_op::SCISSOR => i += 3,
+            _ => i += 1,
+        }
+    }
+    assert_eq!(tex_quads, 4, "four ring corner sprites per rounded border");
+    assert_eq!(rects, 4, "four solid edge bars per rounded border");
+    let view = ui.texture(ring.unwrap()).expect("baked ring texture");
+    let stride = view.w as usize;
+    let alpha_at = |x: usize, y: usize| view.pixels[(y * stride + x) * 4 + 3];
+    let c = 44usize; // ring center in 4x texel space (outer r=11, density=1)
+    assert_eq!(alpha_at(c, c), 0, "ring center is hollow");
+    assert_eq!(alpha_at(c, 0), 255, "ring outer rim is solid");
+    assert_eq!(alpha_at(c, 4), 0, "inside the inner radius is hollow");
+    // (50,0) sits on the outer rim (d ~= 44 texels), so its supersamples
+    // straddle the rim and yield partial coverage.
+    let grad = alpha_at(50, 0);
+    assert!(
+        grad > 0 && grad < 255,
+        "ring rim must carry an AA gradient, got {grad}"
+    );
+}
+
+#[test]
+fn stroked_rounded_corner_renders_per_pixel_arc_gradient() {
+    // The issue's exact repro: a ~40x25 stroked button (border 1, rounded-[10])
+    // at 100% and 125% DPI. The hollow-ring path must fade each arc row in
+    // along x (per-pixel supersampled coverage, like the disc fill path and
+    // browsers) instead of collapsing the whole arc row to ONE alpha like the
+    // old per-row span path (the blocky "visual radius ~65%" symptom).
+    for density in [1u32, 2] {
+        let mut ui = Ui::new_with_raster_density(density);
+        let n = ui.create_node(0);
+        ui.set_prop(n, spec::prop::WIDTH, 40.0);
+        ui.set_prop(n, spec::prop::HEIGHT, 25.0);
+        ui.set_prop(
+            n,
+            spec::prop::POS_TYPE,
+            spec::PosType::Absolute as u32 as f64,
+        );
+        ui.set_prop(n, spec::prop::INSET_T, 10.0);
+        ui.set_prop(n, spec::prop::INSET_L, 10.0);
+        ui.set_prop(n, spec::prop::RADIUS, 10.0);
+        ui.set_prop(n, spec::prop::BORDER_COLOR, abgr(99, 102, 241, 255) as f64);
+        ui.set_prop(n, spec::prop::BORDER_WIDTH, 1.0);
+        ui.insert_before(spec::ROOT_ID, n, 0);
+        ui.tick();
+        let words = ui.draw().words.clone();
+        let mut fb = alloc::vec![0u8; spec::SCREEN_W as usize * spec::SCREEN_H as usize * 4];
+        crate::raster::render(&ui, &words, &mut fb);
+        let stride = spec::SCREEN_W as usize;
+        // RGB framebuffer: byte +0 is red; blending against the black
+        // background yields stroke_color_red * coverage, so 99 == full alpha.
+        let b_at = |x: usize, y: usize| fb[(y * stride + x) * 4 + 0];
+        // The stroke is a HOLLOW ring: the row crosses outer-edge AA
+        // (partial coverage at density 1, where the 4x-baked ring's AA band
+        // spans a whole logical pixel), the hollow interior (0), then the
+        // solid top bar. At density 2 the AA band is sub-logical-pixel (it
+        // shows on the physical pixels of a scale-2 render), so assert the
+        // ring structure instead.
+        let row: Vec<u8> = (15..22).map(|x| b_at(x, 10)).collect();
+        let mut uniq = row.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        if density == 1 {
+            assert!(
+                uniq.len() >= 3,
+                "density={density} arc row must carry multiple alpha levels, got {row:?}"
+            );
+            assert!(
+                row.iter().any(|&v| v > 0 && v < 99),
+                "density={density} arc row must carry partial coverage (AA), got {row:?}"
+            );
+        } else {
+            assert!(
+                row.contains(&0) && row.contains(&99),
+                "density={density} arc row must cross hollow ring + solid stroke, got {row:?}"
+            );
+        }
+        assert!(
+            row.contains(&99),
+            "density={density} arc row must reach full stroke coverage, got {row:?}"
+        );
+        // The top straight edge stays solid; the node center stays hollow
+        // (the border is a ring, not a fill).
+        assert_eq!(b_at(30, 10), 99, "density={density} straight edge must be solid");
+        assert_eq!(b_at(30, 20), 0, "density={density} border must leave the center hollow");
+    }
 }
 
 #[test]
