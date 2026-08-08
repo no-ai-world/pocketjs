@@ -465,7 +465,12 @@ function dispatchToEditable(
   }
 }
 
-function dispatchSelectablePointer(x: number, y: number, down: boolean): boolean {
+function dispatchSelectablePointer(
+  x: number,
+  y: number,
+  down: boolean,
+  shift = false,
+): boolean {
   // 路由一帧指针接触到可选文字节点。
   if (manualHostInput) return false;
   if (!down) {
@@ -473,7 +478,7 @@ function dispatchSelectablePointer(x: number, y: number, down: boolean): boolean
     const capture = selectableCapture;
     selectableCapture = null;
     const handler = selectableHandlers.get(capture);
-    if (handler) dispatchToSelectable({ t: "mouse", x, y, d: false }, handler, true);
+    if (handler) dispatchToSelectable({ t: "mouse", x, y, d: false, sh: shift }, handler, true);
     return true;
   }
 
@@ -488,7 +493,7 @@ function dispatchSelectablePointer(x: number, y: number, down: boolean): boolean
     selectableOwner = selectable;
   }
   const handler = selectableHandlers.get(selectable);
-  if (handler) dispatchToSelectable({ t: "mouse", x, y, d: true }, handler, true);
+  if (handler) dispatchToSelectable({ t: "mouse", x, y, d: true, sh: shift }, handler, true);
   return true;
 }
 
@@ -512,7 +517,7 @@ function dispatchMouseEvent(
   ev: Extract<HostInputEvent, { t: "mouse" }>,
 ): void {
   if (ev.outside && ev.d === false) {
-    if (dispatchSelectablePointer(ev.x, ev.y, false)) {
+    if (dispatchSelectablePointer(ev.x, ev.y, false, ev.sh ?? false)) {
       focusNode(null);
       return;
     }
@@ -528,11 +533,11 @@ function dispatchMouseEvent(
   }
 
   if (selectableCapture) {
-    dispatchSelectablePointer(ev.x, ev.y, ev.d !== false);
+    dispatchSelectablePointer(ev.x, ev.y, ev.d !== false, ev.sh ?? false);
     return;
   }
 
-  if (ev.d === true && dispatchSelectablePointer(ev.x, ev.y, true)) return;
+  if (ev.d === true && dispatchSelectablePointer(ev.x, ev.y, true, ev.sh ?? false)) return;
 
   if (ev.d === true) {
     clearSelectableTextSelection();
@@ -700,7 +705,6 @@ export function installHostInputPump(opts?: { channelName?: string; bindCleanup?
   return dispose;
 }
 
-/** 请求宿主为任意运行时字符串扩展字形（text.glyphs.runtime）。 */
 /** 请求宿主为任意运行时字符串扩展字形（text.glyphs.runtime）。 */
 export function ensureText(text: string): void {
   if (!text) return;
