@@ -101,10 +101,21 @@ describe("desktop launcher arguments", () => {
     // dist 是运行期输入，必须由 launcher 显式传给原生二进制（构建到哪、加载哪）。
     // 回归保护：若 launcher 再漏传 POCKETJS_DIST，二进制将退回 cwd 的 ./dist，
     // 在非仓库根目录运行时会失败（junction 共享产物时曾去错误的 dist 找 js/pak）。
+    // 比裸 includes() 强的地方：必须同时存在 "env 构造块含 POCKETJS_DIST" 和
+    // "spawn 确实使用该 env"，捕获 "定义了却没用" 和 "用了却不含该键" 两种回归。
     const root = fileURLToPath(new URL("..", import.meta.url));
     for (const launcher of ["tools/app-widget.ts", "tools/note.ts"]) {
       const src = readFileSync(join(root, launcher), "utf8");
-      expect(src.includes(`POCKETJS_DIST: join(root, "dist")`)).toBe(true);
+      // 定义位置关系链：env 块定义 → 块内含 POCKETJS_DIST → 其后确有 spawn
+      // 使用该 env。用行号序排除“注释/死代码里有匹配文本”的假阳性，并保证
+      // 被使用的 env 正是携带 POCKETJS_DIST 的那个（而不是某个无关 env）。
+      const envDefIdx = src.indexOf("const env = {");
+      const distIdx = src.indexOf('POCKETJS_DIST: join(root, "dist")');
+      const spawnIdx = src.search(/\.env\(\s*env[,)]/);
+      expect(
+        envDefIdx >= 0 && distIdx > envDefIdx && spawnIdx > distIdx,
+        `${launcher} must define env with POCKETJS_DIST and spawn with that env`,
+      ).toBe(true);
     }
   });
 });

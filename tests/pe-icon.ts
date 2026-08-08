@@ -54,11 +54,20 @@ function resourceDirectoryRva(data: Buffer): number | undefined {
   const sizeOfOptionalHeader = data.readUInt16LE(coff + 16);
   if (numberOfSections === 0 || sizeOfOptionalHeader < 112) return undefined;
   const optional = coff + 20;
+  // The whole optional header must actually be present before any of its
+  // fields are read — a truncated file must probe as "unparseable", not
+  // throw a RangeError.
+  if (optional + sizeOfOptionalHeader > data.length) return undefined;
   const magic = data.readUInt16LE(optional);
   // IMAGE_OPTIONAL_HEADER: NumberOfRvaAndSizes / data directories differ by
   // 16 bytes between PE32 (0x10b) and PE32+ (0x20b).
   const rvaAndSizesOffset = magic === 0x20b ? optional + 108 : magic === 0x10b ? optional + 92 : undefined;
   if (rvaAndSizesOffset === undefined) return undefined;
+  // Reading `count` plus the data directory at index 2 needs 24 bytes from
+  // here — and those must stay inside the optional header, not just inside
+  // the file: a truncated optional header would otherwise read section-table
+  // bytes as a resource RVA and misreport an icon.
+  if (rvaAndSizesOffset + 24 > optional + sizeOfOptionalHeader) return undefined;
   const count = data.readUInt32LE(rvaAndSizesOffset);
   if (count <= 2) return undefined;
   // Data directory index 2 = resource table: { rva, size }. RVA 0 means the
