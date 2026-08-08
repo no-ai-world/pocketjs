@@ -220,6 +220,10 @@ struct SlotAtlas {
     /// gid-linear coverage cells.
     coverage: Vec<u8>,
     known: HashSet<u32>,
+    /// Codepoints this slot can never provide (the font lacks the glyph, or
+    /// the atlas hit `MAX_GLYPHS`) — `ensure` skips them instead of
+    /// re-probing the font on every text report.
+    failed: HashSet<u32>,
     dirty: bool,
 }
 
@@ -264,6 +268,7 @@ impl SlotAtlas {
             cmap,
             coverage: blob[cmap_end..cmap_end + glyph_count * cell_bytes].to_vec(),
             known,
+            failed: HashSet::new(),
             dirty: false,
         })
     }
@@ -275,11 +280,15 @@ impl SlotAtlas {
     /// Rasterize `cp` from `font` into a new appended cell.
     fn append(&mut self, font: &FontRef<'_>, cp: char) {
         if self.glyph_count() >= MAX_GLYPHS {
+            self.failed.insert(cp as u32);
             return;
         }
         let gid_font = font.glyph_id(cp);
         if gid_font.0 == 0 {
-            return; // fallback font lacks it too — the core's tofu handles it
+            // Fallback font lacks it too — the core's tofu renders it, and
+            // `ensure` must not re-probe this codepoint on every report.
+            self.failed.insert(cp as u32);
+            return;
         }
         let px = slot_px(self.slot);
         let density = self.density as f32;
@@ -400,7 +409,11 @@ impl CjkAtlases {
             let mut seen = HashSet::new();
             text.chars()
                 .filter(|c| (*c as u32) > 0x7f && !c.is_control())
-                .filter(|c| self.slots.iter().any(|s| !s.known.contains(&(*c as u32))))
+                .filter(|c| {
+                    self.slots.iter().any(|s| {
+                        !s.known.contains(&(*c as u32)) && !s.failed.contains(&(*c as u32))
+                    })
+                })
                 .filter(|c| seen.insert(*c))
                 .collect()
         };
@@ -413,7 +426,7 @@ impl CjkAtlases {
         };
         for cp in &missing {
             for slot in &mut self.slots {
-                if !slot.known.contains(&(*cp as u32)) {
+                if !slot.known.contains(&(*cp as u32)) && !slot.failed.contains(&(*cp as u32)) {
                     slot.append(&font, *cp);
                 }
             }
@@ -437,7 +450,8 @@ impl CjkAtlases {
 
 #[cfg(test)]
 mod tests {
-    use super::is_font_file;
+    use super::{CjkAtlases, SlotAtlas, is_font_file};
+    use std::collections::HashSet;
     use std::path::Path;
 
     #[test]
@@ -482,5 +496,65 @@ mod tests {
             "Inter 'A' cap height at 1em={px}px should be ~{:.1}px, got {ink:.1}px",
             px * 0.74
         );
+    }
+
+    #[test]
+    fn append_records_unrasterizable_codepoints() {
+        // Inter has no CJK glyphs: append must fail fast and record the
+        // codepoint in `failed` instead of silently retrying every report.
+        use ab_glyph::FontRef;
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let font_path = Path::new(manifest).join("../../../../assets/fonts/Inter-Regular.ttf");
+        let data = std::fs::read(font_path).expect("Inter-Regular.ttf");
+        let leaked: &'static [u8] = Box::leak(data.into_boxed_slice());
+        let font = FontRef::try_from_slice(leaked).expect("parse Inter");
+
+        let mut slot = SlotAtlas {
+            slot: 0,
+            cell_w: 8,
+            cell_h: 8,
+            baseline: 6,
+            line_height: 8,
+            flags: 0,
+            density: 1,
+            cmap: Vec::new(),
+            coverage: Vec::new(),
+            known: HashSet::new(),
+            failed: HashSet::new(),
+            dirty: false,
+        };
+        slot.append(&font, '中');
+        assert!(slot.failed.contains(&('中' as u32)));
+        assert!(!slot.known.contains(&('中' as u32)));
+        assert_eq!(slot.glyph_count(), 0, "nothing rasterized");
+        // A repeated probe (what `ensure` would do) must not keep growing.
+        slot.append(&font, '中');
+        assert_eq!(slot.failed.len(), 1);
+    }
+
+    #[test]
+    fn ensure_skips_codepoints_a_slot_cannot_provide() {
+        let mut atlases = CjkAtlases {
+            source: None,
+            source_resolved: false,
+            slots: vec![SlotAtlas {
+                slot: 0,
+                cell_w: 8,
+                cell_h: 8,
+                baseline: 6,
+                line_height: 8,
+                flags: 0,
+                density: 1,
+                cmap: Vec::new(),
+                coverage: Vec::new(),
+                known: HashSet::new(),
+                failed: HashSet::from([('中' as u32)]),
+                dirty: false,
+            }],
+        };
+        // The slot already knows it cannot provide '中' — even though the
+        // codepoint is absent from `known`, ensure must report nothing
+        // missing (no re-probe, no blobs) for it.
+        assert!(atlases.ensure("中").is_empty());
     }
 }
