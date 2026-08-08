@@ -49,7 +49,7 @@ use pocket_ui_wgpu::{UiRenderer, UiSurface};
 use pocket_widget::shell::{CpuFrame, FlatWidget, WidgetConfig};
 use pocket3d::gpu::{Gpu, OFFSCREEN_FORMAT, OffscreenTarget, save_png};
 use pocket3d::input::{EditKey, ImeInput, Input};
-use pocketjs_core::damage::{DamagePolicy, DamageTracker, DEFAULT_DAMAGE_REGIONS};
+use pocketjs_core::damage::{DEFAULT_DAMAGE_REGIONS, DamagePolicy, DamageRect, DamageTracker};
 use pocketjs_core::raster;
 use winit::keyboard::KeyCode;
 
@@ -61,8 +61,40 @@ const HEADER_BUTTONS_W: f32 = 112.0;
 const GRIP: f32 = 18.0;
 /// The spec CIRCLE bit — the framework's onPress button.
 const BTN_CIRCLE: u32 = 0x2000;
-/// Default CPU raster scale (see `--cpu-scale`; 1 = logical viewport px).
-const CPU_SCALE_DEFAULT: u32 = 1;
+/// Default CPU raster scale (see `--cpu-scale`; 0 = follow the raster
+/// density so the soft framebuffer matches the GPU path's resolution).
+const CPU_SCALE_DEFAULT: u32 = 0;
+
+/// Resolve the CPU raster scale for a run: an explicit `--cpu-scale` wins;
+/// the default (0) follows the raster density — the GPU path renders at
+/// density (2 = 2x) while the CPU path previously rasterized 1x, so text
+/// came out half-resolution and visibly soft on the same window. The
+/// density is clamped to the raster's scale limit: a pak baked above 4x
+/// must not panic the CPU path.
+fn effective_cpu_scale(cpu_scale: u32, density: u32) -> u32 {
+    if cpu_scale == 0 {
+        density.clamp(1, raster::MAX_RENDER_SCALE)
+    } else {
+        cpu_scale
+    }
+}
+
+/// Scale logical damage rects to framebuffer space (`scale` samples per
+/// logical px). The shell maps `CpuFrame.damaged` to the window client
+/// assuming framebuffer rects; at scale > 1 a logical rect read as
+/// framebuffer-space would cover only the top-left corner.
+fn scale_damage(regions: &[DamageRect], scale: u32) -> Vec<DamageRect> {
+    let scale = scale.max(1) as i32;
+    regions
+        .iter()
+        .map(|r| DamageRect {
+            x0: r.x0 * scale,
+            y0: r.y0 * scale,
+            x1: r.x1 * scale,
+            y1: r.y1 * scale,
+        })
+        .collect()
+}
 /// Ticks a scripted drag takes from press to its final position.
 const DRAG_TICKS: u64 = 8;
 /// Default logical minimum for a resizable desktop window.
@@ -376,10 +408,10 @@ struct NoteGame {
     /// CPU present path: retained-pixel damage tracking across frames
     /// (the shell's framebuffer persists between presents).
     damage: DamageTracker<DEFAULT_DAMAGE_REGIONS>,
-    /// CPU present path: integer raster scale (1 = logical viewport px).
-    /// The shell resamples the framebuffer to the client size, so a
-    /// higher scale supersamples fractional-DPI displays (crisper text,
-    /// 4× the raster work per frame).
+    /// CPU present path: effective integer raster scale (0 in `Args` =
+    /// unset → follows the raster density). The shell resamples the
+    /// framebuffer to the client size, so a higher scale supersamples
+    /// fractional-DPI displays (crisper text, 4× the raster work per frame).
     cpu_scale: u32,
     /// Caret rect reported by the guest (logical px) — docks the IME
     /// candidate window.
@@ -1137,10 +1169,15 @@ impl FlatWidget for NoteGame {
             plan.region_count(),
             started.elapsed().as_secs_f64() * 1000.0
         );
+        // The raster's damage plan is in logical viewport space, but the
+        // shell maps CpuFrame.damaged to the window client assuming
+        // framebuffer (physical) rects. Scale them up to framebuffer
+        // space before handing them over.
+        let damaged = scale_damage(plan.regions(), self.cpu_scale);
         Ok(CpuFrame {
             width,
             height,
-            damaged: plan.regions().to_vec(),
+            damaged,
         })
     }
 
@@ -1282,8 +1319,9 @@ struct Args {
     /// CPU present path (`--cpu-render`): no wgpu device; the window is
     /// a software framebuffer presented via GDI (softbuffer).
     cpu_render: bool,
-    /// CPU present path: integer raster scale for the framebuffer (1..4).
-    /// The shell resamples it to the window client size.
+    /// CPU present path: integer raster scale for the framebuffer
+    /// (1..4; 0 = default, follows the raster density). The shell
+    /// resamples it to the window client size.
     cpu_scale: u32,
     /// CPU present path: after the boot ticks, run this many extra ticks
     /// rendering every dirty frame via the production incremental path,
@@ -1801,7 +1839,10 @@ fn run_with_args(mut args: Args) -> Result<()> {
     );
     game.script = std::mem::take(&mut args.script);
     game.quit_after = args.auto_quit.map(|s| (s * 60.0) as u64);
-    game.cpu_scale = args.cpu_scale;
+    // Unset (0) follows the raster density so the CPU present path renders
+    // at the same resolution as the GPU path by default; an explicit
+    // --cpu-scale still wins for hosts trading sharpness for raster cost.
+    game.cpu_scale = effective_cpu_scale(args.cpu_scale, args.density);
     if let Some(program) = args.companion.take() {
         let bridge = companion::CompanionBridge::spawn_simple(
             program.clone(),
@@ -1987,7 +2028,8 @@ fn headless_cpu(mut game: NoteGame, args: Args, out: &std::path::Path) -> Result
         );
     }
     game.take_dirty();
-    let scale = args.cpu_scale.max(1);
+    // game.cpu_scale already resolved (0 → density) in run_with_args.
+    let scale = game.cpu_scale.max(1);
     let (w, h) = (args.size.0 * scale, args.size.1 * scale);
     let mut fb = vec![0u32; w as usize * h as usize];
     let bytes = pocket_widget::shell::framebuffer_bytes(&mut fb);
@@ -2021,6 +2063,52 @@ fn save_cpu_png(fb: &[u32], width: u32, height: u32, out: &std::path::Path) -> R
         ]);
     }
     save_png(out, width, height, &rgba)
+}
+
+#[cfg(test)]
+mod cpu_render_tests {
+    // CPU present path pure helpers — platform-independent, so they run on
+    // every `cargo test` target (Linux CI included), not just Windows/macOS.
+    use super::{effective_cpu_scale, scale_damage};
+    use pocketjs_core::damage::DamageRect;
+
+    #[test]
+    fn cpu_scale_defaults_to_density() {
+        // Unset (0) follows the raster density: the CPU path must render
+        // at the same resolution as the GPU path by default (density 2 = 2x).
+        assert_eq!(effective_cpu_scale(0, 2), 2);
+        assert_eq!(effective_cpu_scale(0, 1), 1);
+        // An explicit --cpu-scale always wins, including over a higher density.
+        assert_eq!(effective_cpu_scale(2, 1), 2);
+        assert_eq!(effective_cpu_scale(4, 2), 4);
+        // A degenerate density must not collapse the framebuffer to zero.
+        assert_eq!(effective_cpu_scale(0, 0), 1);
+        // A density above the raster's max scale clamps instead of panicking.
+        assert_eq!(
+            effective_cpu_scale(0, 5),
+            pocketjs_core::raster::MAX_RENDER_SCALE
+        );
+    }
+
+    #[test]
+    fn cpu_damage_scales_to_framebuffer_space() {
+        // The shell maps CpuFrame.damaged to the window client as
+        // framebuffer rects; the raster reports logical ones, so a 2x
+        // render must double the rects or only the top-left quarter of
+        // the window repaints.
+        let regions = [DamageRect::new(0, 0, 1280, 720)];
+        assert_eq!(
+            scale_damage(&regions, 2),
+            vec![DamageRect::new(0, 0, 2560, 1440)]
+        );
+        let partial = [DamageRect::new(100, 50, 300, 150)];
+        assert_eq!(
+            scale_damage(&partial, 2),
+            vec![DamageRect::new(200, 100, 600, 300)]
+        );
+        // scale 1 is the identity (logical == framebuffer space).
+        assert_eq!(scale_damage(&regions, 1), regions.to_vec());
+    }
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]

@@ -164,14 +164,15 @@ pub trait WidgetGame {
 }
 
 /// One CPU-present frame: the framebuffer the game rasterized and the
-/// logical-viewport rectangles that were actually repainted (the shell
+/// framebuffer-space rectangles that were actually repainted (the shell
 /// blits only those; everything outside them is retained from earlier
 /// frames).
 pub struct CpuFrame {
     pub width: u32,
     pub height: u32,
-    /// Logical damage rects repainted this frame (always non-empty; a
-    /// full redraw is the whole viewport).
+    /// Damage rects repainted this frame, in framebuffer (physical) space
+    /// — the shell maps them to the window client directly (always
+    /// non-empty; a full redraw is the whole framebuffer).
     pub damaged: Vec<DamageRect>,
 }
 
@@ -205,8 +206,9 @@ pub trait FlatWidget {
     /// CPU present path only: rasterize the current frame into `fb` — the
     /// shell's persistent framebuffer — resizing it to the game's chosen
     /// viewport × integer scale. Returns the framebuffer dimensions and
-    /// the damage rects the frame actually repainted, so the shell blits
-    /// only those. Called only on frames that render.
+    /// the damage rects the frame actually repainted, in framebuffer
+    /// (physical) space, so the shell blits only those. Called only on
+    /// frames that render.
     fn render_cpu(&mut self, fb: &mut Vec<u32>, window_px: (u32, u32)) -> Result<CpuFrame> {
         let _ = (fb, window_px);
         Err(anyhow!("CPU rendering not implemented by this game"))
@@ -309,8 +311,8 @@ pub fn framebuffer_bytes(fb: &mut [u32]) -> &mut [u8] {
     bytemuck::cast_slice_mut(fb)
 }
 
-/// Copy the given logical rects 1:1 from `src` into `dst` (same size),
-/// returning the corresponding destination rects for
+/// Copy the given framebuffer-space rects 1:1 from `src` into `dst`
+/// (same size), returning the corresponding destination rects for
 /// [`Buffer::present_with_damage`].
 fn copy_rects(
     src: &[u32],
@@ -346,7 +348,7 @@ fn copy_rects(
     present
 }
 
-/// Bilinear resampler from the game's logical framebuffer to the window
+/// Bilinear resampler from the game's framebuffer to the window
 /// client size (fractional-DPI displays; scale-1.0 displays never use it
 /// — sizes match and [`copy_rects`] handles the blit).
 ///
@@ -371,9 +373,10 @@ impl Resampler {
         self.run_rects(src, sw, sh, dst, dw, dh, &[rect]);
     }
 
-    /// Resample only the given logical damage rects from `src` into `dst`
-    /// (dest rects are the client-scaled equivalents). Returns the
-    /// corresponding destination rectangles for [`Buffer::present_with_damage`].
+    /// Resample only the given framebuffer-space damage rects from `src`
+    /// into `dst` (dest rects are the client-scaled equivalents). Returns
+    /// the corresponding destination rectangles for
+    /// [`Buffer::present_with_damage`].
     #[allow(clippy::too_many_arguments)] // (src, src size, dst, dst size, rects)
     fn run_rects(
         &mut self,
@@ -397,14 +400,25 @@ impl Resampler {
         let (sw, dw) = (sw as usize, dw as usize);
         let mut present = Vec::with_capacity(rects.len());
         for &rect in rects {
-            // Scale the logical rect outwards to the client grid.
+            // Clamp to the framebuffer first (same rule as copy_rects), then
+            // scale the framebuffer rect outwards to the client grid. A
+            // negative or out-of-bounds rect would otherwise cast to huge
+            // indices and panic while slicing `xs`/`ys`.
+            let (x0, y0) = (
+                rect.x0.clamp(0, sw as i32) as u64,
+                rect.y0.clamp(0, sh as i32) as u64,
+            );
+            let (x1, y1) = (
+                rect.x1.clamp(0, sw as i32) as u64,
+                rect.y1.clamp(0, sh as i32) as u64,
+            );
             let (dx0, dy0) = (
-                (rect.x0 as u64 * dw as u64 / sw as u64) as usize,
-                (rect.y0 as u64 * dh as u64 / sh as u64) as usize,
+                (x0 * dw as u64 / sw as u64) as usize,
+                (y0 * dh as u64 / sh as u64) as usize,
             );
             let (dx1, dy1) = (
-                ((rect.x1 as u64 * dw as u64).div_ceil(sw as u64)) as usize,
-                ((rect.y1 as u64 * dh as u64).div_ceil(sh as u64)) as usize,
+                (x1 * dw as u64).div_ceil(sw as u64) as usize,
+                (y1 * dh as u64).div_ceil(sh as u64) as usize,
             );
             if dx0 >= dx1 || dy0 >= dy1 {
                 continue;
@@ -1356,5 +1370,62 @@ mod tests {
         }
         let per = t.elapsed().as_secs_f64() * 100.0;
         println!("resample 1280x720->1600x900: {per:.2}ms/frame");
+    }
+
+    /// Framebuffer-space damage rects (the CPU path's CpuFrame contract)
+    /// must map onto the correct client region: a 2x framebuffer rect
+    /// covering the bottom-right quadrant lands on the client's bottom-
+    /// right quadrant, and the untouched top-left stays retained. A
+    /// logical rect misread as framebuffer-space would only repaint the
+    /// top-left quarter of the window.
+    #[test]
+    fn resampler_maps_framebuffer_damage_to_client() {
+        let src = vec![0xFFAA_BBCCu32; 2560 * 1440];
+        let mut dst = vec![0u32; 1280 * 720];
+        let mut r = Resampler::default();
+        // Bottom-right quadrant of the 2x framebuffer — the logical rect
+        // (640,360,1280,720) scaled by 2.
+        let rect = pocketjs_core::damage::DamageRect::new(1280, 720, 2560, 1440);
+        let present = r.run_rects(&src, 2560, 1440, &mut dst, 1280, 720, &[rect]);
+        assert_eq!(present.len(), 1);
+        assert_eq!(present[0].x, 640);
+        assert_eq!(present[0].y, 360);
+        assert_eq!(present[0].width.get(), 640);
+        assert_eq!(present[0].height.get(), 360);
+        for y in 0..360 {
+            for x in 0..640 {
+                assert_eq!(dst[y * 1280 + x], 0, "top-left must stay retained");
+            }
+        }
+        for y in 360..720 {
+            for x in 640..1280 {
+                assert_ne!(dst[y * 1280 + x], 0, "bottom-right must repaint");
+            }
+        }
+    }
+
+    /// Negative / out-of-bounds damage rects must not panic or wrap: the
+    /// shell maps `CpuFrame.damaged` straight to the window client, and the
+    /// game is not trusted to stay in bounds.
+    #[test]
+    fn resampler_clamps_out_of_bounds_damage() {
+        let src = vec![0xFF_AA_BB_CCu32; 2560 * 1440];
+        let mut dst = vec![0u32; 1280 * 720];
+        let mut r = Resampler::default();
+        // A fully offscreen rect (all-negative) must collapse to nothing.
+        let off = pocketjs_core::damage::DamageRect::new(-50, -50, -10, -10);
+        assert!(
+            r.run_rects(&src, 2560, 1440, &mut dst, 1280, 720, &[off])
+                .is_empty()
+        );
+        // A rect larger than the framebuffer must clamp to the full frame
+        // (the client blit then covers the whole window).
+        let big = pocketjs_core::damage::DamageRect::new(0, 0, 9999, 9999);
+        let present = r.run_rects(&src, 2560, 1440, &mut dst, 1280, 720, &[big]);
+        assert_eq!(present.len(), 1);
+        assert_eq!(present[0].x, 0);
+        assert_eq!(present[0].y, 0);
+        assert_eq!(present[0].width.get(), 1280);
+        assert_eq!(present[0].height.get(), 720);
     }
 }
