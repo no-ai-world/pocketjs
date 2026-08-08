@@ -46,9 +46,11 @@ use anyhow::{Context, Result, anyhow};
 use glam::Vec2;
 use pocket_mod::Guest;
 use pocket_ui_wgpu::{UiRenderer, UiSurface};
-use pocket_widget::shell::{FlatWidget, WidgetConfig};
-use pocket3d::gpu::{Gpu, OFFSCREEN_FORMAT, OffscreenTarget};
+use pocket_widget::shell::{CpuFrame, FlatWidget, WidgetConfig};
+use pocket3d::gpu::{Gpu, OFFSCREEN_FORMAT, OffscreenTarget, save_png};
 use pocket3d::input::{EditKey, ImeInput, Input};
+use pocketjs_core::damage::{DamagePolicy, DamageTracker, DEFAULT_DAMAGE_REGIONS};
+use pocketjs_core::raster;
 use winit::keyboard::KeyCode;
 
 /// Header strip height in logical px — mirrors HEADER_H in apps/note/app.tsx.
@@ -59,6 +61,8 @@ const HEADER_BUTTONS_W: f32 = 112.0;
 const GRIP: f32 = 18.0;
 /// The spec CIRCLE bit — the framework's onPress button.
 const BTN_CIRCLE: u32 = 0x2000;
+/// Default CPU raster scale (see `--cpu-scale`; 1 = logical viewport px).
+const CPU_SCALE_DEFAULT: u32 = 1;
 /// Ticks a scripted drag takes from press to its final position.
 const DRAG_TICKS: u64 = 8;
 /// Default logical minimum for a resizable desktop window.
@@ -369,6 +373,14 @@ struct NoteGame {
     renderer: Option<UiRenderer>,
     /// Runtime CJK atlas extension (IME input → system-font glyphs).
     atlases: cjk::CjkAtlases,
+    /// CPU present path: retained-pixel damage tracking across frames
+    /// (the shell's framebuffer persists between presents).
+    damage: DamageTracker<DEFAULT_DAMAGE_REGIONS>,
+    /// CPU present path: integer raster scale (1 = logical viewport px).
+    /// The shell resamples the framebuffer to the client size, so a
+    /// higher scale supersamples fractional-DPI displays (crisper text,
+    /// 4× the raster work per frame).
+    cpu_scale: u32,
     /// Caret rect reported by the guest (logical px) — docks the IME
     /// candidate window.
     caret_rect: Option<CaretRect>,
@@ -489,6 +501,8 @@ impl NoteGame {
             guest,
             renderer: None,
             atlases,
+            damage: DamageTracker::new(),
+            cpu_scale: CPU_SCALE_DEFAULT,
             caret_rect: None,
             file,
             logical,
@@ -1089,6 +1103,47 @@ impl FlatWidget for NoteGame {
         Ok(())
     }
 
+    fn render_cpu(&mut self, fb: &mut Vec<u32>, window_px: (u32, u32)) -> Result<CpuFrame> {
+        let _ = window_px;
+        // CPU present: rasterize the retained DrawList into the shell's
+        // framebuffer at the configured integer scale. The framebuffer is
+        // viewport-sized (logical × scale), never window-sized — the
+        // shell resamples it to the client (1:1 on scale-1.0 displays,
+        // bilinear on fractional DPI). The damage tracker keys on the
+        // retained pixels, so only changed regions repaint.
+        let scale = self.cpu_scale.max(1);
+        let (width, height) = (self.logical.0 * scale, self.logical.1 * scale);
+        fb.resize((width as usize) * (height as usize), 0);
+        let bytes = pocket_widget::shell::framebuffer_bytes(fb);
+        let started = std::time::Instant::now();
+        let plan = self
+            .surface
+            .with_ui(|ui| {
+                raster::render_scaled_argb_incremental(
+                    ui,
+                    &self.words,
+                    bytes,
+                    scale,
+                    &mut self.damage,
+                    DamagePolicy::default(),
+                )
+            })
+            .map_err(|e| anyhow!("cpu damage plan failed: {e:?}"))?;
+        log::debug!(
+            "note-widget: cpu frame {}x{}@{}x ({} region(s)) in {:.2}ms",
+            width,
+            height,
+            scale,
+            plan.region_count(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        Ok(CpuFrame {
+            width,
+            height,
+            damaged: plan.regions().to_vec(),
+        })
+    }
+
     fn drag_at(&mut self, cursor: Vec2) -> bool {
         // Decorated desktop demos leave move/resize to the OS title bar and
         // edges. Only the borderless note sticky needs an in-content handle.
@@ -1224,6 +1279,16 @@ struct Args {
     frames: u64,
     script: Vec<(u64, ScriptEvent)>,
     auto_quit: Option<f32>,
+    /// CPU present path (`--cpu-render`): no wgpu device; the window is
+    /// a software framebuffer presented via GDI (softbuffer).
+    cpu_render: bool,
+    /// CPU present path: integer raster scale for the framebuffer (1..4).
+    /// The shell resamples it to the window client size.
+    cpu_scale: u32,
+    /// CPU present path: after the boot ticks, run this many extra ticks
+    /// rendering every dirty frame via the production incremental path,
+    /// then report p50/p95/max frame times (interaction perf gate).
+    cpu_perf_ticks: u32,
     /// External companion program (JSON lines on stdio).
     companion: Option<PathBuf>,
     /// Extra args for the companion program.
@@ -1394,6 +1459,9 @@ fn parse_args() -> Result<Args> {
         frames: 40,
         script: Vec::new(),
         auto_quit: None,
+        cpu_render: false,
+        cpu_scale: CPU_SCALE_DEFAULT,
+        cpu_perf_ticks: 0,
         companion: None,
         companion_args: Vec::new(),
         companion_cwd: None,
@@ -1438,6 +1506,14 @@ fn parse_args() -> Result<Args> {
             "--companion-cwd" => args.companion_cwd = Some(PathBuf::from(val("--companion-cwd")?)),
             "--screenshot" => args.screenshot = Some(PathBuf::from(val("--screenshot")?)),
             "--frames" => args.frames = val("--frames")?.parse()?,
+            "--cpu-render" => args.cpu_render = true,
+            "--cpu-scale" => {
+                args.cpu_scale = val("--cpu-scale")?.parse()?;
+                if !(1..=4).contains(&args.cpu_scale) {
+                    return Err(anyhow!("--cpu-scale wants 1 through 4"));
+                }
+            }
+            "--cpu-perf-ticks" => args.cpu_perf_ticks = val("--cpu-perf-ticks")?.parse()?,
             "--click" => {
                 let (frame, spec) = at(&val("--click")?, "--click")?;
                 let (x, y) = spec
@@ -1725,6 +1801,7 @@ fn run_with_args(mut args: Args) -> Result<()> {
     );
     game.script = std::mem::take(&mut args.script);
     game.quit_after = args.auto_quit.map(|s| (s * 60.0) as u64);
+    game.cpu_scale = args.cpu_scale;
     if let Some(program) = args.companion.take() {
         let bridge = companion::CompanionBridge::spawn_simple(
             program.clone(),
@@ -1736,11 +1813,16 @@ fn run_with_args(mut args: Args) -> Result<()> {
     }
 
     if let Some(out) = args.screenshot.clone() {
-        headless(game, args, &out)
-    } else if note_chrome {
-        // Pocket Note: ambient sticky — borderless, transparent, always-on-top.
-        // Transparent may degrade to opaque on some Windows adapters; shell logs it.
-        pocket_widget::run_flat(
+        if args.cpu_render {
+            headless_cpu(game, args, &out)
+        } else {
+            headless(game, args, &out)
+        }
+    } else {
+        let config = if note_chrome {
+            // Pocket Note: ambient sticky — borderless, transparent, always-on-top.
+            // Transparent may degrade to opaque on some Windows adapters; the
+            // CPU present path always degrades (a DIB has no alpha).
             WidgetConfig {
                 title,
                 size: args.size,
@@ -1752,12 +1834,9 @@ fn run_with_args(mut args: Args) -> Result<()> {
                 #[cfg(any(target_os = "windows", target_os = "macos"))]
                 tray: tray_config.clone(),
                 ..Default::default()
-            },
-            game,
-        )
-    } else {
-        // Ordinary OS window chrome: title bar + edges, no custom grip.
-        pocket_widget::run_flat(
+            }
+        } else {
+            // Ordinary OS window chrome: title bar + edges, no custom grip.
             WidgetConfig {
                 title,
                 size: args.size,
@@ -1772,9 +1851,14 @@ fn run_with_args(mut args: Args) -> Result<()> {
                 #[cfg(any(target_os = "windows", target_os = "macos"))]
                 tray: tray_config,
                 ..Default::default()
-            },
-            game,
-        )
+            }
+        };
+        if args.cpu_render {
+            log::info!("note-widget: CPU present path (--cpu-render, no wgpu device)");
+            pocket_widget::run_flat_cpu(config, game)
+        } else {
+            pocket_widget::run_flat(config, game)
+        }
     }
 }
 
@@ -1850,6 +1934,93 @@ fn headless(mut game: NoteGame, args: Args, out: &std::path::Path) -> Result<()>
         scale
     );
     Ok(())
+}
+
+/// Headless CPU screenshot (--cpu-render): same ticks as [`headless`] but
+/// no GPU — the frame is rasterized by the core rasterizer into a software
+/// framebuffer and saved as PNG, with full-frame raster timing (the
+/// CPU-present performance gate).
+fn headless_cpu(mut game: NoteGame, args: Args, out: &std::path::Path) -> Result<()> {
+    let mut input = Input::default();
+    let px = (args.size.0, args.size.1);
+    let has_companion = game.companion.is_some();
+    for i in 0..args.frames {
+        game.tick(1.0 / 60.0, &input, px, 1.0)?;
+        input.end_frame();
+        if has_companion && i % 30 == 29 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    if has_companion {
+        for _ in 0..60 {
+            game.tick(1.0 / 60.0, &input, px, 1.0)?;
+            input.end_frame();
+        }
+    }
+    // Interaction perf gate: render every dirty frame through the
+    // production incremental path (render_cpu + DamageTracker) and report
+    // the frame-time distribution — the same code the windowed shell
+    // drives on scrolls, clicks and live danmaku.
+    let mut frame_times: Vec<f64> = Vec::new();
+    let mut perf_fb: Vec<u32> = Vec::new();
+    for _ in 0..args.cpu_perf_ticks {
+        game.tick(1.0 / 60.0, &input, px, 1.0)?;
+        input.end_frame();
+        if game.take_dirty() {
+            let started = std::time::Instant::now();
+            game.render_cpu(&mut perf_fb, px)?;
+            frame_times.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    if !frame_times.is_empty() {
+        frame_times.sort_by(|a, b| a.total_cmp(b));
+        let p = |q: f64| frame_times[((frame_times.len() - 1) as f64 * q) as usize];
+        let sum: f64 = frame_times.iter().sum();
+        println!(
+            "note-widget: cpu perf {} ticks, {} frames: p50={:.2}ms p95={:.2}ms max={:.2}ms avg={:.2}ms",
+            args.cpu_perf_ticks,
+            frame_times.len(),
+            p(0.5),
+            p(0.95),
+            p(1.0),
+            sum / frame_times.len() as f64
+        );
+    }
+    game.take_dirty();
+    let scale = args.cpu_scale.max(1);
+    let (w, h) = (args.size.0 * scale, args.size.1 * scale);
+    let mut fb = vec![0u32; w as usize * h as usize];
+    let bytes = pocket_widget::shell::framebuffer_bytes(&mut fb);
+    let started = std::time::Instant::now();
+    game.surface
+        .with_ui(|ui| raster::render_scaled_argb(ui, &game.words, bytes, scale));
+    let elapsed = started.elapsed();
+    save_cpu_png(&fb, w, h, out)?;
+    println!(
+        "note-widget: cpu headless wrote {} after {} frames ({}x{} @{}x) — \
+         full frame raster {:.2}ms",
+        out.display(),
+        args.frames,
+        w,
+        h,
+        scale,
+        elapsed.as_secs_f64() * 1000.0
+    );
+    Ok(())
+}
+
+/// Save an ARGB-word framebuffer as an RGBA PNG via the shared encoder.
+fn save_cpu_png(fb: &[u32], width: u32, height: u32, out: &std::path::Path) -> Result<()> {
+    let mut rgba = Vec::with_capacity(fb.len() * 4);
+    for &pixel in fb {
+        rgba.extend_from_slice(&[
+            ((pixel >> 16) & 0xFF) as u8,
+            ((pixel >> 8) & 0xFF) as u8,
+            (pixel & 0xFF) as u8,
+            ((pixel >> 24) & 0xFF) as u8,
+        ]);
+    }
+    save_png(out, width, height, &rgba)
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]

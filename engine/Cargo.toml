@@ -53,6 +53,11 @@ rquickjs = "0.12"
 
 wgpu = "25"
 winit = "0.30"
+# CPU present path for widget shells that must not touch a GPU device
+# (softbuffer's Windows backend is pure GDI — GetDC + CreateDIBSection +
+# BitBlt — with no D3D device; see softbuffer/src/backends/win32.rs).
+softbuffer = "0.4"
+
 # default-features off so pocket3d-bsp can build no_std (libm) for the PSP;
 # desktop crates re-enable "std" per member.
 glam = { version = "0.33", default-features = false }

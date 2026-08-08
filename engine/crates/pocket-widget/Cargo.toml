@@ -10,6 +10,8 @@ description = "Desktop widgets as a runtime-family capability: widget window she
 pocket3d = { workspace = true }
 pocket-ui-wgpu = { workspace = true }
 pocketjs-core = { workspace = true }
+softbuffer = { workspace = true }
+bytemuck = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }
 glam = { workspace = true, features = ["std"] }

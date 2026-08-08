@@ -20,6 +20,7 @@
 //!   surface, rendered 1:1 by `pocket-ui-wgpu` with no scene pass at all.
 //!   The natural shape for text-first widgets (notes, tickers, boards).
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
@@ -38,6 +39,7 @@ use pocket3d::hud::Hud;
 use pocket3d::input::Input;
 use pocket3d::renderer::Renderer;
 use pocket3d::scene::Scene;
+use pocketjs_core::damage::DamageRect;
 
 /// Effective window transparency after surface configuration.
 ///
@@ -161,15 +163,35 @@ pub trait WidgetGame {
     }
 }
 
+/// One CPU-present frame: the framebuffer the game rasterized and the
+/// logical-viewport rectangles that were actually repainted (the shell
+/// blits only those; everything outside them is retained from earlier
+/// frames).
+pub struct CpuFrame {
+    pub width: u32,
+    pub height: u32,
+    /// Logical damage rects repainted this frame (always non-empty; a
+    /// full redraw is the whole viewport).
+    pub damaged: Vec<DamageRect>,
+}
+
 /// What the widget loop needs from a 2D (window-is-the-surface) product.
 ///
 /// Same governor, no scene: the game renders whatever it wants straight
 /// into the swapchain view — for a PocketJS widget that is one
-/// `UiRenderer::render_words` pass over the guest's DrawList.
+/// `UiRenderer::render_words` pass over the guest's DrawList. The CPU
+/// present path ([`run_flat_cpu`]) never creates a GPU device: it calls
+/// [`init_cpu`](Self::init_cpu) instead of [`init`](Self::init) and
+/// [`render_cpu`](Self::render_cpu) instead of [`render`](Self::render).
 pub trait FlatWidget {
     /// Called once after the GPU exists. `format` is the swapchain format
-    /// the game's pipelines must target.
+    /// the game's pipelines must target. CPU runs never call this.
     fn init(&mut self, gpu: &Gpu, format: wgpu::TextureFormat) -> Result<()>;
+    /// CPU present path only: one-time setup with no GPU device (no
+    /// renderer to create — the rasterizer lives in the core).
+    fn init_cpu(&mut self) -> Result<()> {
+        Ok(())
+    }
     /// One fixed-step tick — the guest turn. `window_px` is the surface
     /// size in physical pixels; `scale` the window's scale factor (cursor
     /// positions and `window_px` are physical — divide by `scale` for
@@ -178,8 +200,17 @@ pub trait FlatWidget {
     /// Consume the "needs a GPU frame" flag (latched by the shell).
     fn take_dirty(&mut self) -> bool;
     /// Draw into the swapchain view (submit your own encoder). Called only
-    /// on frames that render.
+    /// on frames that render. CPU runs never call this.
     fn render(&mut self, gpu: &Gpu, view: &wgpu::TextureView, window_px: (u32, u32)) -> Result<()>;
+    /// CPU present path only: rasterize the current frame into `fb` — the
+    /// shell's persistent framebuffer — resizing it to the game's chosen
+    /// viewport × integer scale. Returns the framebuffer dimensions and
+    /// the damage rects the frame actually repainted, so the shell blits
+    /// only those. Called only on frames that render.
+    fn render_cpu(&mut self, fb: &mut Vec<u32>, window_px: (u32, u32)) -> Result<CpuFrame> {
+        let _ = (fb, window_px);
+        Err(anyhow!("CPU rendering not implemented by this game"))
+    }
     /// Left-press policy: OS window drag (move) at this cursor position?
     fn drag_at(&mut self, cursor: Vec2) -> bool {
         let _ = cursor;
@@ -218,12 +249,230 @@ pub fn run(config: WidgetConfig, game: impl WidgetGame) -> Result<()> {
             game,
             renderer: None,
         },
+        RenderBackend::Wgpu,
     )
 }
 
 /// Run a 2D widget (the window is the surface).
 pub fn run_flat(config: WidgetConfig, game: impl FlatWidget) -> Result<()> {
-    run_driver(config, FlatDriver { game })
+    run_driver(
+        config,
+        FlatDriver { game },
+        RenderBackend::Wgpu,
+    )
+}
+
+/// Run a 2D widget on the CPU present path (softbuffer): the window
+/// presents a software framebuffer via GDI DIBs — no wgpu adapter/device,
+/// no GPU driver floor — for hosts that must stay cheap at rest. The
+/// governor, input, IME and tray are identical to [`run_flat`]; only the
+/// frame is rasterized by the game (core raster) into the shell's buffer.
+///
+/// Consequences (softbuffer blits 1:1 and never stretches):
+///
+/// - the window is forced opaque (a DIB has no alpha channel);
+/// - the game's framebuffer is resampled by the shell to the window
+///   client size, so fractional-DPI displays (125%) present a soft
+///   bilinear upscale — scale-1.0 displays are pixel-exact. Games that
+///   want crisper text on fractional DPI can raster at a higher integer
+///   scale and let the same resampler downscale.
+pub fn run_flat_cpu(config: WidgetConfig, game: impl FlatWidget) -> Result<()> {
+    if config.transparent {
+        log::warn!(
+            "pocket-widget: CPU present path forces an opaque window; ignoring transparent=true"
+        );
+    }
+    run_driver(
+        WidgetConfig {
+            transparent: false,
+            ..config
+        },
+        FlatDriver { game },
+        RenderBackend::Cpu,
+    )
+}
+
+/// Which present backend the governor drives: a wgpu device + swapchain,
+/// or the shell-owned software framebuffer presented via softbuffer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RenderBackend {
+    Wgpu,
+    Cpu,
+}
+
+/// View a u32 framebuffer as its in-memory byte layout for core CPU
+/// rasterizers. `fb` is u32-aligned by construction, so the byte view is
+/// always well-aligned; on little-endian hosts (all supported desktop
+/// targets) each word reads as B,G,R,A bytes — exactly what the raster's
+/// ARGB output paths emit.
+pub fn framebuffer_bytes(fb: &mut [u32]) -> &mut [u8] {
+    bytemuck::cast_slice_mut(fb)
+}
+
+/// Copy the given logical rects 1:1 from `src` into `dst` (same size),
+/// returning the corresponding destination rects for
+/// [`Buffer::present_with_damage`].
+fn copy_rects(
+    src: &[u32],
+    dst: &mut [u32],
+    w: u32,
+    h: u32,
+    rects: &[DamageRect],
+) -> Vec<softbuffer::Rect> {
+    assert_eq!(src.len() as u32, w * h);
+    assert_eq!(dst.len() as u32, w * h);
+    let (w, h) = (w as usize, h as usize);
+    let mut present = Vec::with_capacity(rects.len());
+    for &rect in rects {
+        let x0 = rect.x0.clamp(0, w as i32) as usize;
+        let x1 = rect.x1.clamp(0, w as i32) as usize;
+        let y0 = rect.y0.clamp(0, h as i32) as usize;
+        let y1 = rect.y1.clamp(0, h as i32) as usize;
+        if x0 >= x1 || y0 >= y1 {
+            continue;
+        }
+        for y in y0..y1 {
+            let src_row = &src[y * w + x0..y * w + x1];
+            let dst_row = &mut dst[y * w + x0..y * w + x1];
+            dst_row.copy_from_slice(src_row);
+        }
+        present.push(softbuffer::Rect {
+            x: x0 as u32,
+            y: y0 as u32,
+            width: NonZeroU32::new((x1 - x0) as u32).expect("rect width > 0"),
+            height: NonZeroU32::new((y1 - y0) as u32).expect("rect height > 0"),
+        });
+    }
+    present
+}
+
+/// Bilinear resampler from the game's logical framebuffer to the window
+/// client size (fractional-DPI displays; scale-1.0 displays never use it
+/// — sizes match and [`copy_rects`] handles the blit).
+///
+/// Fixed-point Q7 blending (fractions in 0..=128) with axis tables rebuilt
+/// only when a size changes, so the per-pixel inner loop has no divisions
+/// and no float math.
+#[derive(Default)]
+struct Resampler {
+    src: (u32, u32),
+    dst: (u32, u32),
+    /// Per destination x: (x0, x1, f) — f in Q7.
+    xs: Vec<(u32, u32, u32)>,
+    /// Per destination y: (y0, y1, f) — f in Q7.
+    ys: Vec<(u32, u32, u32)>,
+}
+
+impl Resampler {
+    /// Full-frame resample (test helper).
+    #[cfg(test)]
+    fn run(&mut self, src: &[u32], sw: u32, sh: u32, dst: &mut [u32], dw: u32, dh: u32) {
+        let rect = DamageRect::new(0, 0, sw as i32, sh as i32);
+        self.run_rects(src, sw, sh, dst, dw, dh, &[rect]);
+    }
+
+    /// Resample only the given logical damage rects from `src` into `dst`
+    /// (dest rects are the client-scaled equivalents). Returns the
+    /// corresponding destination rectangles for [`Buffer::present_with_damage`].
+    #[allow(clippy::too_many_arguments)] // (src, src size, dst, dst size, rects)
+    fn run_rects(
+        &mut self,
+        src: &[u32],
+        sw: u32,
+        sh: u32,
+        dst: &mut [u32],
+        dw: u32,
+        dh: u32,
+        rects: &[DamageRect],
+    ) -> Vec<softbuffer::Rect> {
+        assert_eq!(src.len() as u32, sw * sh);
+        assert_eq!(dst.len() as u32, dw * dh);
+        if self.src != (sw, sh) || self.dst != (dw, dh) {
+            self.xs = resample_axis(sw, dw);
+            self.ys = resample_axis(sh, dh);
+            self.src = (sw, sh);
+            self.dst = (dw, dh);
+        }
+        let (xs, ys) = (&self.xs, &self.ys);
+        let (sw, dw) = (sw as usize, dw as usize);
+        let mut present = Vec::with_capacity(rects.len());
+        for &rect in rects {
+            // Scale the logical rect outwards to the client grid.
+            let (dx0, dy0) = (
+                (rect.x0 as u64 * dw as u64 / sw as u64) as usize,
+                (rect.y0 as u64 * dh as u64 / sh as u64) as usize,
+            );
+            let (dx1, dy1) = (
+                ((rect.x1 as u64 * dw as u64).div_ceil(sw as u64)) as usize,
+                ((rect.y1 as u64 * dh as u64).div_ceil(sh as u64)) as usize,
+            );
+            if dx0 >= dx1 || dy0 >= dy1 {
+                continue;
+            }
+            for (y, &(y0, y1, fy)) in ys[dy0..dy1].iter().enumerate() {
+                let y = y + dy0;
+                let row0 = y0 as usize * sw;
+                let row1 = y1 as usize * sw;
+                let inv_fy = 128 - fy;
+                for (x, &(x0, x1, fx)) in xs[dx0..dx1].iter().enumerate() {
+                    let x = x + dx0;
+                    let p00 = src[row0 + x0 as usize];
+                    let p01 = src[row0 + x1 as usize];
+                    let p10 = src[row1 + x0 as usize];
+                    let p11 = src[row1 + x1 as usize];
+                    // x-lerp on 16-bit lanes (B,R and G,A pairs never carry
+                    // across lanes: products <= 255*128 < 2^15), y-lerp per
+                    // byte on the two x-blended pixels.
+                    let top = lerp_x(p00, p01, fx, 128 - fx);
+                    let bottom = lerp_x(p10, p11, fx, 128 - fx);
+                    let mut out = 0u32;
+                    for shift in [0, 8, 16, 24] {
+                        let c = (((top >> shift) & 0xFF) * inv_fy
+                            + ((bottom >> shift) & 0xFF) * fy)
+                            >> 7;
+                        out |= (c & 0xFF) << shift;
+                    }
+                    dst[y * dw + x] = out;
+                }
+            }
+            present.push(softbuffer::Rect {
+                x: dx0 as u32,
+                y: dy0 as u32,
+                width: NonZeroU32::new((dx1 - dx0) as u32).expect("rect width > 0"),
+                height: NonZeroU32::new((dy1 - dy0) as u32).expect("rect height > 0"),
+            });
+        }
+        present
+    }
+}
+
+/// Q7 lerp of the B,R lane pair and the G,A lane pair in one pass each
+/// (each 16-bit lane product stays below 2^15, so packed adds never carry
+/// across lanes).
+fn lerp_x(p0: u32, p1: u32, f: u32, inv: u32) -> u32 {
+    let lo = (p0 & 0x00FF00FF) * inv + (p1 & 0x00FF00FF) * f;
+    let hi = ((p0 >> 24) << 16 | ((p0 >> 8) & 0xFF)) * inv
+        + (((p1 >> 24) << 16 | ((p1 >> 8) & 0xFF)) * f);
+    ((lo >> 7) & 0x00FF00FF) | (((hi >> 7) & 0x00FF00FF) << 8)
+}
+
+/// One resample axis: for each destination index, the floor source index,
+/// its +1 neighbour, and the Q7 blend fraction. Source coordinates follow
+/// the centre-aligned bilinear convention: sx = (x + 0.5)*src/dst - 0.5.
+fn resample_axis(src_len: u32, dst_len: u32) -> Vec<(u32, u32, u32)> {
+    let den = (2 * dst_len) as i64;
+    (0..dst_len)
+        .map(|x| {
+            // ((2x+1)*src - dst) / (2*dst), floored
+            let mut num = (2 * x as i64 + 1) * src_len as i64 - dst_len as i64;
+            let sx = num.div_euclid(den);
+            num -= sx * den; // 0 <= num < den
+            let f = ((num * 128) / den) as u32;
+            let x0 = sx.clamp(0, src_len as i64 - 1) as u32;
+            let x1 = (sx + 1).clamp(0, src_len as i64 - 1) as u32;
+            (x0, x1, f)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +483,10 @@ pub fn run_flat(config: WidgetConfig, game: impl FlatWidget) -> Result<()> {
 /// traits funnel into this so the governor exists exactly once.
 trait Driver {
     fn init(&mut self, gpu: &Gpu, format: wgpu::TextureFormat) -> Result<()>;
+    /// CPU present path: one-time setup with no GPU device.
+    fn init_cpu(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn tick(&mut self, dt: f32, input: &Input, window_px: (u32, u32), scale: f64) -> Result<()>;
     fn take_dirty(&mut self) -> bool;
     fn render(
@@ -243,6 +496,11 @@ trait Driver {
         window_px: (u32, u32),
         time: f32,
     ) -> Result<()>;
+    /// CPU present path: rasterize into the shell's framebuffer.
+    fn render_cpu(&mut self, fb: &mut Vec<u32>, window_px: (u32, u32)) -> Result<CpuFrame> {
+        let _ = (fb, window_px);
+        Err(anyhow!("CPU rendering not supported by this driver"))
+    }
     fn drag_at(&mut self, cursor: Vec2) -> bool;
     fn resize_at(&mut self, cursor: Vec2) -> bool;
     fn ime_cursor_area(&mut self) -> Option<(f32, f32, f32, f32)>;
@@ -307,6 +565,9 @@ impl<G: FlatWidget> Driver for FlatDriver<G> {
     fn init(&mut self, gpu: &Gpu, format: wgpu::TextureFormat) -> Result<()> {
         self.game.init(gpu, format)
     }
+    fn init_cpu(&mut self) -> Result<()> {
+        self.game.init_cpu()
+    }
     fn tick(&mut self, dt: f32, input: &Input, window_px: (u32, u32), scale: f64) -> Result<()> {
         self.game.tick(dt, input, window_px, scale)
     }
@@ -321,6 +582,9 @@ impl<G: FlatWidget> Driver for FlatDriver<G> {
         _time: f32,
     ) -> Result<()> {
         self.game.render(gpu, view, window_px)
+    }
+    fn render_cpu(&mut self, fb: &mut Vec<u32>, window_px: (u32, u32)) -> Result<CpuFrame> {
+        self.game.render_cpu(fb, window_px)
     }
     fn drag_at(&mut self, cursor: Vec2) -> bool {
         self.game.drag_at(cursor)
@@ -355,11 +619,12 @@ fn validate_config(config: &WidgetConfig) -> Result<()> {
     Ok(())
 }
 
-fn run_driver(config: WidgetConfig, driver: impl Driver) -> Result<()> {
+fn run_driver(config: WidgetConfig, driver: impl Driver, backend: RenderBackend) -> Result<()> {
     validate_config(&config)?;
     let event_loop = EventLoop::new()?;
     let mut app = WidgetApp {
         config,
+        backend,
         driver,
         state: None,
         error: None,
@@ -405,9 +670,7 @@ struct ArmCounts {
 
 struct WindowState {
     window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    surface_config: wgpu::SurfaceConfiguration,
-    gpu: Gpu,
+    present: Present,
     input: Input,
     start: Instant,
     next_tick: Instant,
@@ -427,8 +690,57 @@ struct WindowState {
     tray: Option<crate::tray::TrayState>,
 }
 
+impl WindowState {
+    /// The current surface size in physical px (the space cursor
+    /// positions and `window_px` live in).
+    fn window_px(&self) -> (u32, u32) {
+        match &self.present {
+            Present::Wgpu { surface_config, .. } => {
+                (surface_config.width, surface_config.height)
+            }
+            // CPU: the framebuffer follows the window client exactly (the
+            // scale factor is pinned to 1.0), so inner_size IS the surface.
+            Present::Cpu { .. } => {
+                let size = self.window.inner_size();
+                (size.width.max(1), size.height.max(1))
+            }
+        }
+    }
+}
+
+/// The present backend a [`WindowState`] drives.
+///
+/// Field order matters for drop: the softbuffer context must outlive the
+/// surface that borrows it.
+enum Present {
+    Wgpu {
+        surface: wgpu::Surface<'static>,
+        surface_config: wgpu::SurfaceConfiguration,
+        gpu: Gpu,
+    },
+    Cpu {
+        /// Kept alive so the softbuffer [`Context`] outlives the surface
+        /// that borrows it (the surface holds a raw pointer to it).
+        #[allow(dead_code)]
+        context: softbuffer::Context<Arc<Window>>,
+        surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
+        /// Persistent software framebuffer (ARGB words) the game
+        /// rasterizes into each frame; copied to the softbuffer buffer
+        /// on present. Retained so damage tracking stays valid across
+        /// frames.
+        fb: Vec<u32>,
+        /// Client-size resampler (fractional-DPI displays); caches its
+        /// axis tables across frames.
+        resampler: Resampler,
+        /// Last client size the DIB was (re)created at — a change means
+        /// the retained pixels were lost and everything must repaint.
+        last_client: (u32, u32),
+    },
+}
+
 struct WidgetApp<D: Driver> {
     config: WidgetConfig,
+    backend: RenderBackend,
     driver: D,
     state: Option<WindowState>,
     error: Option<anyhow::Error>,
@@ -486,56 +798,81 @@ impl<D: Driver> WidgetApp<D> {
             },
             None => None,
         };
-        let instance = Gpu::new_instance_for_widgets();
-        let surface = instance.create_surface(window.clone())?;
-        let gpu = Gpu::from_instance_for_surface_with_power_preference(
-            instance,
-            &surface,
-            wgpu::PowerPreference::LowPower,
-        )?;
+        let present = match self.backend {
+            RenderBackend::Wgpu => {
+                let instance = Gpu::new_instance_for_widgets();
+                let surface = instance.create_surface(window.clone())?;
+                let gpu = Gpu::from_instance_for_surface_with_power_preference(
+                    instance,
+                    &surface,
+                    wgpu::PowerPreference::LowPower,
+                )?;
 
-        let px = window.inner_size();
-        let mut surface_config = surface
-            .get_default_config(&gpu.adapter, px.width.max(1), px.height.max(1))
-            .ok_or_else(|| anyhow::anyhow!("surface not supported by adapter"))?;
-        // Demand-rendered widgets rarely present; keep a single buffered frame
-        // of latency so DX12 does not retain multi-frame swapchain images.
-        surface_config.desired_maximum_frame_latency = 1;
-        surface_config.present_mode = wgpu::PresentMode::AutoVsync;
-        if self.config.transparent {
-            // Windows DX12 swapchains often only advertise Opaque. Prefer a
-            // real composite alpha when offered; otherwise degrade explicitly
-            // so ambient sticky hosts still boot, without pretending the
-            // surface stayed transparent.
-            match pick_alpha_mode(&surface, &gpu.adapter) {
-                Ok(mode) => {
-                    set_display_transparent(true);
-                    surface_config.alpha_mode = mode;
-                }
-                Err(error) => {
-                    // Explicit degrade: sticky hosts still boot, but callers can
-                    // observe the loss via display_transparent() == Some(false).
+                let px = window.inner_size();
+                let mut surface_config = surface
+                    .get_default_config(&gpu.adapter, px.width.max(1), px.height.max(1))
+                    .ok_or_else(|| anyhow::anyhow!("surface not supported by adapter"))?;
+                // Demand-rendered widgets rarely present; keep a single buffered frame
+                // of latency so DX12 does not retain multi-frame swapchain images.
+                surface_config.desired_maximum_frame_latency = 1;
+                surface_config.present_mode = wgpu::PresentMode::AutoVsync;
+                if self.config.transparent {
+                    // Windows DX12 swapchains often only advertise Opaque. Prefer a
+                    // real composite alpha when offered; otherwise degrade explicitly
+                    // so ambient sticky hosts still boot, without pretending the
+                    // surface stayed transparent.
+                    match pick_alpha_mode(&surface, &gpu.adapter) {
+                        Ok(mode) => {
+                            set_display_transparent(true);
+                            surface_config.alpha_mode = mode;
+                        }
+                        Err(error) => {
+                            // Explicit degrade: sticky hosts still boot, but callers can
+                            // observe the loss via display_transparent() == Some(false).
+                            set_display_transparent(false);
+                            log::warn!(
+                                "pocket-widget: transparent composite unavailable ({error}); \
+                                 degrading to opaque (display_transparent=false)"
+                            );
+                            surface_config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
+                        }
+                    }
+                } else {
                     set_display_transparent(false);
-                    log::warn!(
-                        "pocket-widget: transparent composite unavailable ({error}); \
-                         degrading to opaque (display_transparent=false)"
-                    );
-                    surface_config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
+                }
+                surface.configure(&gpu.device, &surface_config);
+
+                self.driver.init(&gpu, surface_config.format)?;
+                Present::Wgpu {
+                    surface,
+                    surface_config,
+                    gpu,
                 }
             }
-        } else {
-            set_display_transparent(false);
-        }
-        surface.configure(&gpu.device, &surface_config);
-
-        self.driver.init(&gpu, surface_config.format)?;
+            RenderBackend::Cpu => {
+                // A software framebuffer has no alpha channel: the window
+                // is opaque by construction (run_flat_cpu already forced
+                // it; this is the authoritative record for observers).
+                set_display_transparent(false);
+                let context = softbuffer::Context::new(window.clone())
+                    .map_err(|e| anyhow::anyhow!("softbuffer context: {e}"))?;
+                let surface = softbuffer::Surface::new(&context, window.clone())
+                    .map_err(|e| anyhow::anyhow!("softbuffer surface: {e}"))?;
+                self.driver.init_cpu()?;
+                Present::Cpu {
+                    context,
+                    surface,
+                    fb: Vec::new(),
+                    resampler: Resampler::default(),
+                    last_client: (0, 0),
+                }
+            }
+        };
 
         let now = Instant::now();
         Ok(WindowState {
             window,
-            surface,
-            surface_config,
-            gpu,
+            present,
             input: Input::default(),
             start: now,
             next_tick: now,
@@ -559,7 +896,7 @@ impl<D: Driver> WidgetApp<D> {
         let tick_interval = Duration::from_secs_f32(tick_dt);
         let now = Instant::now();
 
-        let window_px = (state.surface_config.width, state.surface_config.height);
+        let window_px = state.window_px();
         let scale = state.window.scale_factor();
         let mut ran = 0u32;
         while now >= state.next_tick && ran < MAX_CATCHUP_TICKS {
@@ -674,24 +1011,114 @@ impl<D: Driver> WidgetApp<D> {
             self.arms.unarmed_redraws += 1;
             return Ok(());
         }
-        let frame = match state.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                state
-                    .surface
-                    .configure(&state.gpu.device, &state.surface_config);
-                return Ok(()); // render_pending stays latched; next wake retries
+        let window_px = state.window_px();
+        let client_size = state.window.inner_size();
+        match &mut state.present {
+            Present::Wgpu {
+                surface,
+                surface_config,
+                gpu,
+            } => {
+                let frame = match surface.get_current_texture() {
+                    Ok(f) => f,
+                    Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                        surface.configure(&gpu.device, surface_config);
+                        return Ok(()); // render_pending stays latched; next wake retries
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("surface error: {e}")),
+                };
+                let view = frame
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                let size = (surface_config.width, surface_config.height);
+                self.driver
+                    .render(gpu, &view, size, state.start.elapsed().as_secs_f32())?;
+                state.window.pre_present_notify();
+                frame.present();
             }
-            Err(e) => return Err(anyhow::anyhow!("surface error: {e}")),
-        };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let size = (state.surface_config.width, state.surface_config.height);
-        self.driver
-            .render(&state.gpu, &view, size, state.start.elapsed().as_secs_f32())?;
-        state.window.pre_present_notify();
-        frame.present();
+            Present::Cpu {
+                surface,
+                fb,
+                resampler,
+                last_client,
+                ..
+            } => {
+                let started = Instant::now();
+                let frame = self.driver.render_cpu(fb, window_px)?;
+                let width = NonZeroU32::new(frame.width).ok_or_else(|| {
+                    anyhow::anyhow!("cpu render produced a zero-width framebuffer")
+                })?;
+                let height = NonZeroU32::new(frame.height).ok_or_else(|| {
+                    anyhow::anyhow!("cpu render produced a zero-height framebuffer")
+                })?;
+                if fb.len() != (width.get() as usize) * (height.get() as usize) {
+                    return Err(anyhow::anyhow!(
+                        "cpu framebuffer length {} does not match {}x{}",
+                        fb.len(),
+                        width,
+                        height
+                    ));
+                }
+                // softbuffer's win32 backend blits 1:1 (BitBlt SRCCOPY from
+                // the DIB); it never stretches. resize() short-circuits on
+                // unchanged size and is safe to call every frame. The
+                // client size (not the framebuffer size) drives the DIB:
+                // the framebuffer is resampled to it below.
+                let (client_w, client_h) = (client_size.width.max(1), client_size.height.max(1));
+                surface.resize(
+                    NonZeroU32::new(client_w).expect("client width clamped to >= 1"),
+                    NonZeroU32::new(client_h).expect("client height clamped to >= 1"),
+                )
+                .map_err(|e| anyhow::anyhow!("softbuffer resize: {e}"))?;
+                // A recreated DIB (client resize) loses the retained
+                // pixels: everything must be repainted, not just the
+                // damage rects.
+                let damaged = if *last_client == (client_w, client_h) {
+                    frame.damaged
+                } else {
+                    *last_client = (client_w, client_h);
+                    vec![DamageRect::new(
+                        0,
+                        0,
+                        width.get() as i32,
+                        height.get() as i32,
+                    )]
+                };
+                let mut buffer = surface
+                    .buffer_mut()
+                    .map_err(|e| anyhow::anyhow!("softbuffer buffer: {e}"))?;
+                let t_blit = Instant::now();
+                // Blit only the repainted rects (scaled to the client for
+                // fractional DPI), leaving retained pixels untouched.
+                let present_rects = if client_w == width.get() && client_h == height.get() {
+                    copy_rects(fb, &mut buffer, width.get(), height.get(), &damaged)
+                } else {
+                    resampler.run_rects(
+                        fb,
+                        width.get(),
+                        height.get(),
+                        &mut buffer,
+                        client_w,
+                        client_h,
+                        &damaged,
+                    )
+                };
+                buffer
+                    .present_with_damage(&present_rects)
+                    .map_err(|e| anyhow::anyhow!("softbuffer present: {e}"))?;
+                log::debug!(
+                    "pocket-widget: cpu present total {:.2}ms (fb {}x{} -> client {}x{}; \
+                     blit {:.2}ms, {} rect(s))",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    width,
+                    height,
+                    client_w,
+                    client_h,
+                    t_blit.elapsed().as_secs_f64() * 1000.0,
+                    present_rects.len()
+                );
+            }
+        }
 
         state.render_pending = false;
         state.last_render = Instant::now();
@@ -739,11 +1166,22 @@ impl<D: Driver> ApplicationHandler for WidgetApp<D> {
             }
             WindowEvent::Resized(size) => {
                 log::debug!("pocket-widget: Resized {size:?}");
-                state.surface_config.width = size.width.max(1);
-                state.surface_config.height = size.height.max(1);
-                state
-                    .surface
-                    .configure(&state.gpu.device, &state.surface_config);
+                match &mut state.present {
+                    Present::Wgpu {
+                        surface,
+                        surface_config,
+                        gpu,
+                    } => {
+                        surface_config.width = size.width.max(1);
+                        surface_config.height = size.height.max(1);
+                        surface.configure(&gpu.device, surface_config);
+                    }
+                    Present::Cpu { .. } => {
+                        // The framebuffer is re-derived from the game's
+                        // viewport on the next CPU redraw (the softbuffer
+                        // resize happens there too); nothing to do here.
+                    }
+                }
                 state.render_pending = true;
                 self.arms.resized += 1;
             }
@@ -768,7 +1206,7 @@ impl<D: Driver> ApplicationHandler for WidgetApp<D> {
                 ElementState::Pressed => {
                     if let Some(cursor) = state.input.cursor() {
                         if self.config.resizable && self.driver.resize_at(cursor) {
-                            let size = (state.surface_config.width, state.surface_config.height);
+                            let size = state.window_px();
                             state.resizing = Some((cursor, size));
                             // The grip press is a window gesture, not app
                             // input — take the button back.
@@ -839,7 +1277,7 @@ impl<D: Driver> ApplicationHandler for WidgetApp<D> {
 
 #[cfg(test)]
 mod tests {
-    use super::{WidgetConfig, validate_config};
+    use super::{Resampler, WidgetConfig, framebuffer_bytes, validate_config};
 
     #[test]
     fn rejects_reverse_resize_bounds() {
@@ -861,5 +1299,62 @@ mod tests {
             ..WidgetConfig::default()
         };
         assert!(validate_config(&config).is_ok());
+    }
+
+    /// ARGB words viewed as bytes must read B,G,R,A on little-endian
+    /// hosts (all supported desktop targets) — the contract the CPU
+    /// raster's ARGB output paths and softbuffer's u32 buffers share.
+    #[cfg(target_endian = "little")]
+    #[test]
+    fn framebuffer_bytes_reads_bgra_little_endian() {
+        let mut fb = vec![0x01_02_03_04u32];
+        assert_eq!(framebuffer_bytes(&mut fb), [0x04, 0x03, 0x02, 0x01]);
+    }
+
+    #[test]
+    fn resampler_identity_passthrough_is_exact() {
+        let src: Vec<u32> = (0..12).map(|i| 0xFF00_0000 | (i << 4) | i).collect();
+        let mut dst = vec![0u32; 12];
+        let mut r = Resampler::default();
+        r.run(&src, 4, 3, &mut dst, 4, 3);
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn resampler_2x_upscale_centres_and_blends() {
+        // Two half-red / half-blue columns -> the seam lands in the
+        // middle of the destination (centre-aligned sampling), and the
+        // blended column sits between the two source colours.
+        let src = [0xFF00_00FFu32, 0xFFFF_0000u32];
+        let mut dst = [0u32; 4];
+        let mut r = Resampler::default();
+        r.run(&src, 2, 1, &mut dst, 4, 1);
+        // x = 0 -> src 0; x = 3 -> src 1; x = 1,2 -> blends of both.
+        assert_eq!(dst[0], 0xFF00_00FF);
+        assert_eq!(dst[3], 0xFFFF_0000);
+        let b = dst[1] & 0xFF;
+        let r = (dst[1] >> 16) & 0xFF;
+        assert!(b > 0 && b < 255 && r > 0 && r < 255, "mid blend {dst:08x?}");
+    }
+
+    /// Manual probe for the fractional-DPI hot path: 1280x720 -> 1600x900.
+    #[test]
+    fn resampler_125_percent_cost_probe() {
+        let mut src = vec![0xFF33_6699u32; 1280 * 720];
+        for (i, px) in src.iter_mut().enumerate() {
+            let i = i as u32;
+            *px = 0xFF00_0000
+                | (i.wrapping_mul(2654435761) & 0xFF) << 16
+                | (i.wrapping_mul(40503) & 0xFF) << 8
+                | (i.wrapping_mul(11) & 0xFF);
+        }
+        let mut dst = vec![0u32; 1600 * 900];
+        let mut r = Resampler::default();
+        let t = std::time::Instant::now();
+        for _ in 0..10 {
+            r.run(&src, 1280, 720, &mut dst, 1600, 900);
+        }
+        let per = t.elapsed().as_secs_f64() * 100.0;
+        println!("resample 1280x720->1600x900: {per:.2}ms/frame");
     }
 }

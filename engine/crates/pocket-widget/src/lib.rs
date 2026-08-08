@@ -37,5 +37,5 @@ pub use embed::EmbeddedUi;
 pub use parts::{PartMap, PartShape, analog_pack, key_button};
 pub use shell::{
     FlatWidget, WidgetConfig, WidgetGame, clear_display_transparent, display_transparent, run,
-    run_flat,
+    run_flat, run_flat_cpu,
 };
