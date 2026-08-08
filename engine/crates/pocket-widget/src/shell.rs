@@ -470,11 +470,20 @@ impl<D: Driver> WidgetApp<D> {
             window.set_ime_allowed(true);
         }
         // Tray creation happens on the event-loop thread (required by
-        // tray-icon on both platforms). A --tray that cannot materialize
-        // aborts boot — explicit request, explicit failure.
+        // tray-icon on both platforms). A tray is an enhancement, not the
+        // product: a NIM_ADD rejection must degrade to no-tray, never abort
+        // boot (Shell_NotifyIconW can transiently reject right after a
+        // previous tray owner exits — NIM_ADD's own result is the
+        // authoritative signal, so no retry is attempted).
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         let tray = match &self.config.tray {
-            Some(config) => Some(crate::tray::TrayState::create(config)?),
+            Some(config) => match crate::tray::TrayState::create(config) {
+                Ok(tray) => Some(tray),
+                Err(error) => {
+                    log::warn!("pocket-widget: tray unavailable, continuing without it: {error}");
+                    None
+                }
+            },
             None => None,
         };
         let instance = Gpu::new_instance_for_widgets();

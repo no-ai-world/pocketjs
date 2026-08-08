@@ -58,8 +58,14 @@ pub struct TrayState {
 }
 
 impl TrayState {
-    /// Create the tray icon + menu. Explicit failure: the shell reports it
-    /// at boot instead of silently degrading to no-tray.
+    /// Create the tray icon + menu. Failure is reported to the caller, which
+    /// degrades to no-tray — a missing tray icon must never take the whole
+    /// app down.
+    ///
+    /// On Windows `build()` fails when the hidden message window fails to
+    /// create or `Shell_NotifyIconW(NIM_ADD)` returns FALSE (icon rejected
+    /// by the taskbar); a returned state is therefore the authoritative
+    /// "icon is registered" signal.
     pub fn create(config: &TrayConfig) -> Result<Self> {
         let menu = Menu::new();
         #[cfg(target_os = "macos")]
