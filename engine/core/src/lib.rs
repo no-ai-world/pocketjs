@@ -283,6 +283,70 @@ impl Default for Ui {
     }
 }
 
+/// Diagnostic counters for retained core state — where the Ui keeps its
+/// bytes between frames. Counts are capacities/bytes, not a precise RSS
+/// attribution (Vec arenas hold spare capacity; nothing here is freed early).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UiMemStats {
+    /// Allocated slots in the node arena (live + free).
+    pub nodes: usize,
+    /// Rough node arena bytes (Node structs + child/override vec capacities).
+    pub nodes_bytes: usize,
+    /// Style records + timeline tracks.
+    pub styles: usize,
+    /// DrawList words: last frame's length and the retained capacity.
+    pub words: usize,
+    pub words_cap: usize,
+    /// Texture slots currently holding a live texture + backing bytes.
+    pub textures: usize,
+    pub texture_bytes: usize,
+    /// Font atlas bitmap bytes + glyph count (baked + runtime-extended).
+    pub font_bytes: usize,
+    pub font_glyphs: usize,
+    /// Rounded-corner disc cache entries.
+    pub discs: usize,
+    /// Live anim tracks.
+    pub anims: usize,
+}
+
+impl Ui {
+    /// Snapshot the core's retained state sizes for diagnostics.
+    pub fn mem_stats(&self) -> UiMemStats {
+        let mut texture_bytes = 0usize;
+        let mut textures = 0usize;
+        for slot in &self.textures {
+            if let Some(tex) = &slot.tex {
+                textures += 1;
+                texture_bytes += tex.byte_len + tex.palette.as_ref().map_or(0, |p| p.len() * 16);
+            }
+        }
+        let (font_bytes, font_glyphs) = self.fonts.mem_bytes();
+        let nodes_bytes = self
+            .tree
+            .slots
+            .iter()
+            .map(|node| {
+                core::mem::size_of::<tree::Node>()
+                    + node.children.capacity() * 4
+                    + node.overrides.capacity() * 8
+            })
+            .sum();
+        UiMemStats {
+            nodes: self.tree.slots.len(),
+            nodes_bytes,
+            styles: self.styles.records.len() + self.styles.anims.len(),
+            words: self.draw_list.words.len(),
+            words_cap: self.draw_list.words.capacity(),
+            textures,
+            texture_bytes,
+            font_bytes,
+            font_glyphs,
+            discs: self.discs.len(),
+            anims: self.anims.tracks.len(),
+        }
+    }
+}
+
 impl Ui {
     /// Create a core with the pre-created root node (`spec::ROOT_ID`,
     /// full-screen flex column) already in the tree.

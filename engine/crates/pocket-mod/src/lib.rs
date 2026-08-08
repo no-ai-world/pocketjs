@@ -43,6 +43,12 @@ impl Guest {
         Ok(Guest { rt, ctx })
     }
 
+    /// QuickJS heap stats (malloc bytes, strings, objects, …) for
+    /// diagnostics — see `rquickjs::MemoryUsage` (`JSMemoryUsage`).
+    pub fn memory_usage(&self) -> rquickjs::runtime::MemoryUsage {
+        self.rt.memory_usage()
+    }
+
     /// Run `f` with the realm's [`Ctx`]. Surface crates use this to build
     /// per-tick event payloads or to reach guest globals the helpers below
     /// don't cover.

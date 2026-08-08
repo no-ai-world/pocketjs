@@ -429,7 +429,53 @@ enum ScriptEvent {
     Scroll(f32),
 }
 
+/// Whether the periodic memory-stats log is enabled (POCKETJS_MEM_STATS=1).
+fn mem_stats_enabled() -> bool {
+    std::env::var("POCKETJS_MEM_STATS")
+        .map(|value| !value.is_empty() && value != "0")
+        .unwrap_or(false)
+}
+
 impl NoteGame {
+    /// Log where retained memory lives (QuickJS heap, core Ui state, GPU
+    /// uploads). Rough sizes — arena capacities, not precise RSS attribution.
+    fn log_mem_stats(&self) {
+        let m = self.guest.memory_usage();
+        let s = self.surface.with_ui(|ui| ui.mem_stats());
+        let (vbuf_cap, font_tex, img_tex, verts) = self
+            .renderer
+            .as_ref()
+            .map(|r| r.stats())
+            .unwrap_or((0, 0, 0, 0));
+        log::info!(
+            "mem: qjs_heap={}KB (str={}KB obj={}KB prop={}KB shape={}KB code={}KB)\n\
+             mem: words={}/{} ui_nodes={} ({:.1}MB) styles={} textures={} ({:.1}MB) \
+             font={}KB/{}g discs={} anims={}\n\
+             mem: gpu vbuf={}KB verts={} fonts={} imgs={}",
+            m.malloc_size / 1024,
+            m.str_size / 1024,
+            m.obj_size / 1024,
+            m.prop_size / 1024,
+            m.shape_size / 1024,
+            m.js_func_size / 1024,
+            s.words,
+            s.words_cap,
+            s.nodes,
+            s.nodes_bytes as f64 / 1048576.0,
+            s.styles,
+            s.textures,
+            s.texture_bytes as f64 / 1048576.0,
+            s.font_bytes / 1024,
+            s.font_glyphs,
+            s.discs,
+            s.anims,
+            vbuf_cap / 1024,
+            verts,
+            font_tex,
+            img_tex,
+        );
+    }
+
     fn new(
         surface: UiSurface,
         guest: Guest,
@@ -940,6 +986,12 @@ impl FlatWidget for NoteGame {
             self.guest.frame(buttons)?;
         }
         self.surface.tick();
+
+        // Memory diagnostics: log the retained-size breakdown every 10 s —
+        // only when POCKETJS_MEM_STATS is set, so dev runs stay quiet.
+        if self.ticks % 600 == 599 && mem_stats_enabled() {
+            self.log_mem_stats();
+        }
 
         // Guest → host intents: note chrome owns note-local messages
         // (save/menu); quit is the framework close request for both chrome

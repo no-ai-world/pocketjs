@@ -802,8 +802,18 @@ impl UiRenderer {
         }
     }
 
-    fn upload_image(&self, gpu: &Gpu, rgba: &[u8], w: u32, h: u32, linear: bool) -> wgpu::BindGroup {
-        let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+    /// Diagnostics: (vertex buffer capacity bytes, font textures, image
+    /// textures, live vertices from the last frame).
+    pub fn stats(&self) -> (u64, usize, usize, usize) {
+        (
+            self.vbuf_capacity,
+            self.fonts.iter().flatten().count(),
+            self.images.iter().flatten().count(),
+            self.verts.len(),
+        )
+    }
+
+    fn upload_image(&self, gpu: &Gpu, rgba: &[u8], w: u32, h: u32, linear: bool) -> wgpu::BindGroup {        let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("pocket-ui image"),
             size: wgpu::Extent3d {
                 width: w,

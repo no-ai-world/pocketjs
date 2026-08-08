@@ -222,6 +222,18 @@ impl Default for Fonts {
 }
 
 impl Fonts {
+    /// Diagnostics: (total atlas bitmap bytes, total glyph count) retained
+    /// by this registry — counts every loaded or runtime-extended slot.
+    pub(crate) fn mem_bytes(&self) -> (usize, usize) {
+        let mut bytes = 0usize;
+        let mut glyphs = 0usize;
+        for slot in self.slots.iter().flatten() {
+            bytes += slot.bitmap.len();
+            glyphs += slot.glyph_count as usize;
+        }
+        (bytes, glyphs)
+    }
+
     pub fn new() -> Fonts {
         Fonts {
             slots: Default::default(),

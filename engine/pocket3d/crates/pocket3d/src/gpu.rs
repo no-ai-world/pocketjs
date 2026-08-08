@@ -14,6 +14,29 @@ pub const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unor
 /// Depth format used by every 3D pass.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// Instance flags: lean by default — identical to release
+/// (`VALIDATION_INDIRECT_CALL` only). wgpu's debug build default enables the
+/// D3D12 debug layer + full validation in every dev run, which alone can
+/// cost 100+ MB of process memory; engine developers who want the full
+/// validation stack set `POCKETJS_VALIDATE=1`.
+fn instance_flags() -> wgpu::InstanceFlags {
+    let validate = std::env::var("POCKETJS_VALIDATE")
+        .map(|value| !value.is_empty() && value != "0")
+        .unwrap_or(false);
+    if validate {
+        wgpu::InstanceFlags::debugging()
+    } else {
+        wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL
+    }
+}
+
+fn instance_descriptor() -> wgpu::InstanceDescriptor {
+    wgpu::InstanceDescriptor {
+        flags: instance_flags(),
+        ..wgpu::InstanceDescriptor::default()
+    }
+}
+
 pub struct Gpu {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
@@ -48,14 +71,14 @@ impl Gpu {
         compatible_surface: Option<&wgpu::Surface<'_>>,
         power_preference: wgpu::PowerPreference,
     ) -> Result<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(&instance_descriptor());
         Self::from_instance_async(instance, compatible_surface, power_preference).await
     }
 
     /// Create the shared instance first when a surface must be created
     /// before adapter selection (windowed startup path).
     pub fn new_instance() -> wgpu::Instance {
-        wgpu::Instance::new(&wgpu::InstanceDescriptor::default())
+        wgpu::Instance::new(&instance_descriptor())
     }
 
     /// Instance for ambient/desktop widgets: native backend only so Windows
@@ -64,6 +87,7 @@ impl Gpu {
         // Enumerate only the host's primary backend for desktop widgets.
         wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: widget_backends(),
+            flags: instance_flags(),
             ..wgpu::InstanceDescriptor::default()
         })
     }

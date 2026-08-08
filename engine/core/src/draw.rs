@@ -456,6 +456,11 @@ impl DiscCache {
     pub const fn new() -> DiscCache {
         DiscCache { entries: Vec::new() }
     }
+
+    /// Diagnostic: how many rounded-corner masks are currently cached.
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 impl Default for DiscCache {
