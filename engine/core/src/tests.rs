@@ -1026,13 +1026,15 @@ fn opaque_rounded_border_edges_are_integer_quantized_without_hairlines() {
 #[test]
 fn rounded_border_bakes_a_hollow_ring_with_aa_gradient() {
     // The issue's exact repro: a ~40x25 stroked button, radius 10, 1px border.
-    // The hollow ring (outer r=11 = radius+border, inner r=10 = the design
-    // radius, per CSS border semantics) must bake per-pixel supersampled
-    // coverage: outer rim solid, center hollow, and a partial-coverage AA
-    // gradient where the rim crosses a texel — the property the old per-row
-    // span path lacked (each row collapsed to ONE alpha). Rings bake at 4x
-    // oversample (RING_AA_OVERSAMPLE) with the linear flag on, so the
-    // coordinates below are in 4x texel space: center = 11*4, rim at 11*4.
+    // CSS border-radius is the border box's OUTER radius, so the stroke is
+    // the hollow annulus (outer r=10, inner r=9 = radius - border) — the
+    // same geometry the analytic span path draws. It must bake per-pixel
+    // supersampled coverage: outer rim solid, center hollow, and a
+    // partial-coverage AA gradient where the rim crosses a texel — the
+    // property the old per-row span path lacked (each row collapsed to ONE
+    // alpha). Rings bake at 4x oversample (RING_AA_OVERSAMPLE) with the
+    // linear flag on, so the coordinates below are in 4x texel space:
+    // center = 10*4, rim at 10*4.
     let mut ui = Ui::new();
     let n = ui.create_node(0);
     ui.set_prop(n, spec::prop::WIDTH, 40.0);
@@ -1078,13 +1080,13 @@ fn rounded_border_bakes_a_hollow_ring_with_aa_gradient() {
     let view = ui.texture(ring.unwrap()).expect("baked ring texture");
     let stride = view.w as usize;
     let alpha_at = |x: usize, y: usize| view.pixels[(y * stride + x) * 4 + 3];
-    let c = 44usize; // ring center in 4x texel space (outer r=11, density=1)
+    let c = 40usize; // ring center in 4x texel space (outer r=10, density=1)
     assert_eq!(alpha_at(c, c), 0, "ring center is hollow");
     assert_eq!(alpha_at(c, 0), 255, "ring outer rim is solid");
     assert_eq!(alpha_at(c, 4), 0, "inside the inner radius is hollow");
-    // (50,0) sits on the outer rim (d ~= 44 texels), so its supersamples
+    // (44,0) sits on the outer rim (d ~= 40 texels), so its supersamples
     // straddle the rim and yield partial coverage.
-    let grad = alpha_at(50, 0);
+    let grad = alpha_at(44, 0);
     assert!(
         grad > 0 && grad < 255,
         "ring rim must carry an AA gradient, got {grad}"

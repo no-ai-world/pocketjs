@@ -471,11 +471,11 @@ impl Default for DiscCache {
 
 /// Get (or bake + upload) the AA disc texture for logical `r_px`. With
 /// `inner_r_px == 0` it is a solid disc; with `inner_r_px > 0` it is the
-/// hollow annulus between r and r - inner_r (the rounded-border ring). The
-/// texture is a density-scaled 2r x 2r shape, supersampled 4x4, white RGB with
-/// coverage alpha (PSM_8888), padded to pow2 — corners sample their quadrant
-/// and modulate by the fill color, which matches the old span math's
-/// scale_alpha exactly up to AA rounding.
+/// hollow annulus between `inner_r_px` and `r_px` (the rounded-border ring).
+/// The texture is a density-scaled 2r x 2r shape, supersampled 4x4, white RGB
+/// with coverage alpha (PSM_8888), padded to pow2 — corners sample their
+/// quadrant and modulate by the fill color, which matches the old span
+/// math's scale_alpha exactly up to AA rounding.
 ///
 /// Rings bake at an extra `RING_AA_OVERSAMPLE` (4x) resolution and flip the
 /// `linear` flag: a 1px stroke is only a couple of texels wide, and nearest
@@ -2569,27 +2569,29 @@ impl<'a> Walker<'a> {
         // visual corner shrinks to ~65% of the design radius). Large radii
         // and non-flat fills keep the exact span path below.
         //
-        // Ring geometry follows CSS border semantics, verified against
-        // browser output: border-radius is the stroke's INNER radius, so the
-        // hollow annulus runs (r, r + bw] — the outer rim sits border_width
-        // outside the design radius. The old span path and a naive (r-bw, r]
-        // ring both collapse the corner inward by the border width, which is
-        // very visible on a 1px stroke.
+        // Ring geometry follows CSS border semantics: border-radius is the
+        // border box's OUTER radius, so the stroke is the hollow annulus
+        // (r - border_width, r] — matching the analytic span path below and
+        // browsers. (An earlier bake used (r, r + bw], which inflated every
+        // stroked corner by the border width; keep the two paths in sync.)
         if let Fill::Flat(color) = fill {
             let r_px = roundf(r).max(1.0) as u32;
-            let bw_px = roundf(bw).max(1.0) as u32;
-            let outer_r_px = r_px.saturating_add(bw_px);
+            let bw_px = roundf(bw) as u32;
+            let inner_r_px = r_px.saturating_sub(bw_px);
             // Same policy as DISC_MAX_R: recur UI radii cache forever, but an
             // ANIMATED radius mints a new key every frame (scaling
             // rounded-full splash) — large radii take the analytic spans.
             const RING_MAX_R: u32 = 32;
-            if outer_r_px <= RING_MAX_R {
+            // Fractional borders (bw < 0.5 px) keep the analytic span path
+            // below, which preserves the fractional stroke width; the ring
+            // bakes whole-texel radii only.
+            if bw_px >= 1 && r_px <= RING_MAX_R {
                 if let Some((tex, dim)) = disc_texture(
                     self.discs,
                     self.textures,
                     self.tex_free,
-                    outer_r_px,
                     r_px,
+                    inner_r_px,
                     self.raster_density,
                 ) {
                     // Quantize the shared outer edges once before splitting
@@ -2599,13 +2601,13 @@ impl<'a> Walker<'a> {
                     let qy0 = roundf(sy0);
                     let qx1 = roundf(sx1);
                     let qy1 = roundf(sy1);
-                    let rf = (outer_r_px as f32)
-                        .min((qx1 - qx0) * 0.5)
-                        .min((qy1 - qy0) * 0.5);
-                    // Narrow controls (w or h < 2*outer) would clip the ring's
-                    // outer rim; the analytic span path below stays the
+                    let rf = (r_px as f32).min((qx1 - qx0) * 0.5).min((qy1 - qy0) * 0.5);
+                    // Narrow controls (w or h <= 2*r) would leave the ring's
+                    // straight edge bars empty (a height-2r pill has no
+                    // vertical bars at all) and only the corner sprites would
+                    // carry the border; the analytic span path below is the
                     // fallback for those (same clamp the disc path accepts).
-                    if rf >= outer_r_px as f32 - 0.5 {
+                    if rf >= r_px as f32 - 0.5 && qx1 - qx0 > 2.0 * rf && qy1 - qy0 > 2.0 * rf {
                         let bf = (bw_px as f32).min(rf);
                         // Quadrant UV layout: each corner quad is rf x rf,
                         // sampling the baked ring's matching quadrant with the
@@ -2613,7 +2615,7 @@ impl<'a> Walker<'a> {
                         // button's arc center sits at (qx0+r, qy0+r). Edge
                         // bars tile the straight segments between quads.
                         let tex_per_log = self.raster_density * RING_AA_OVERSAMPLE;
-                        let du = (outer_r_px * tex_per_log) as f32 / dim as f32;
+                        let du = (r_px * tex_per_log) as f32 / dim as f32;
                         let corners = [
                             (qx0, qy0, 0.0, 0.0),           // TL quadrant
                             (qx1 - rf, qy0, du, 0.0),       // TR
