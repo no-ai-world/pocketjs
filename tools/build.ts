@@ -293,12 +293,8 @@ const atlases = await bakeAtlases({
   regularTtf: regularFontPath,
   boldTtf: boldFontPath,
 });
-for (const a of atlases) {
-  console.log(
-    `  font: slot ${a.slot} (${a.px}px${a.bold ? " bold" : ""}) ${a.glyphCount} glyphs, ` +
-      `cell ${a.cellW}x${a.cellH}, coverage ${a.coverageW}x${a.coverageH} @${a.rasterDensity}x, ${a.bytes.length} bytes`,
-  );
-}
+const totalFontBytes = atlases.reduce((sum, a) => sum + a.bytes.length, 0);
+console.log(`  fonts: ${atlases.length} slot(s), ${totalFontBytes} bytes`);
 
 const fontLineHeights = Object.fromEntries(atlases.map((atlas) => [atlas.slot, atlas.lineHeight]));
 const generatedStyles = generateStylesModule(styles, fontLineHeights);
@@ -306,10 +302,6 @@ const generatedStyles = generateStylesModule(styles, fontLineHeights);
 // receives this build's source directly through jsxPlugin, so concurrent
 // targets can never import another build's transient STYLE_IDS table.
 await Bun.write(generatedPath, generatedStyles);
-console.log(
-  `  tailwind: ${styles.records.length} style record(s), ${styles.anims.length} baked timeline(s), ` +
-    `${Object.keys(styles.ids).length} literal(s) -> framework/src/styles.generated.ts`,
-);
 
 // demo images: any collected literal ending .png/.svg is a candidate asset name
 const blobs: PakBlob[] = [
@@ -351,9 +343,6 @@ for (const name of imageNames) {
   if (found) {
     if (/\.svg$/i.test(found)) {
       img = bakeSvg(await Bun.file(found).text(), rasterDensity);
-      console.log(
-        `  image: ${name} <- ${found} (${img.width}x${img.height}, svg @${rasterDensity}x)`,
-      );
     } else {
       const base = decodePng(new Uint8Array(await Bun.file(found).arrayBuffer()));
       // Static images and sprite atlases share the same @Nx convention. A
@@ -364,20 +353,12 @@ for (const name of imageNames) {
         const highDensity = decodePng(new Uint8Array(await Bun.file(variant).arrayBuffer()));
         assertDensityVariantDimensions(base, highDensity, rasterDensity, found, variant);
         img = highDensity;
-        console.log(
-          `  image: ${name} <- ${variant} (${img.width}x${img.height}, @${rasterDensity}x for ${base.width}x${base.height})`,
-        );
       } else {
         img = base;
-        console.log(
-          `  image: ${name} <- ${found} (${img.width}x${img.height}` +
-            `${rasterDensity > 1 ? `, 1x fallback (no ${variant})` : ""})`,
-        );
       }
     }
   } else {
     img = placeholderImage();
-    console.log(`  image: ${name} not found (tried ${candidates.join(", ")}) — baking a 32x32 placeholder`);
   }
   const sp = spriteMeta[name];
   if (sp) {
@@ -396,7 +377,6 @@ for (const name of imageNames) {
         sp.psm ?? PSM.PSM_8888,
       ),
     });
-    console.log(`  sprite: ${name} (${sp.frames} frames, ${sp.cols} cols, step ${sp.step}, psm ${sp.psm ?? PSM.PSM_8888})`);
   } else {
     const meta = imageMeta[name];
     const flags = meta?.linear ? IMG_FLAG_LINEAR : 0;
@@ -405,7 +385,6 @@ for (const name of imageNames) {
       dtype: PAK_DTYPE.u8,
       data: encodeImageEntry(img, meta?.psm ?? PSM.PSM_8888, flags),
     });
-    if (flags) console.log(`  image: ${name} sampled linear (images.json)`);
   }
 }
 
@@ -416,7 +395,6 @@ for (const name of imageNames) {
 const pakManifestPath = join(appDir, "pak.json");
 if (existsSync(pakManifestPath)) {
   const rawEntries = JSON.parse(await Bun.file(pakManifestPath).text()) as Array<{ key: string; file: string }>;
-  let rawBytes = 0;
   for (const e of rawEntries) {
     const basePath = join(appDir, e.file);
     if (!existsSync(basePath)) {
@@ -427,12 +405,7 @@ if (existsSync(pakManifestPath)) {
     const path = densityPath !== basePath && existsSync(densityPath) ? densityPath : basePath;
     const data = new Uint8Array(await Bun.file(path).arrayBuffer());
     blobs.push({ key: e.key, dtype: PAK_DTYPE.u8, data });
-    rawBytes += data.length;
-    if (path !== basePath) {
-      console.log(`  raw: ${e.key} <- ${path} (@${rasterDensity}x)`);
-    }
   }
-  console.log(`  raw: ${rawEntries.length} prebaked blob(s) from pak.json, ${rawBytes} bytes`);
 }
 
 const pak = pack(blobs);
