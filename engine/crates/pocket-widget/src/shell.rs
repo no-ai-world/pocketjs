@@ -67,7 +67,7 @@ pub fn clear_display_transparent() {
 fn set_display_transparent(value: bool) {
     // 单线程 boot 路径写入一次，并打可 grep 的稳定日志
     DISPLAY_TRANSPARENT.store(if value { 2 } else { 1 }, Ordering::Relaxed);
-    log::info!(
+    log::debug!(
         "pocket-widget: display_transparent={}",
         if value { 1 } else { 0 }
     );
@@ -1120,7 +1120,7 @@ impl<D: Driver> WidgetApp<D> {
                 buffer
                     .present_with_damage(&present_rects)
                     .map_err(|e| anyhow::anyhow!("softbuffer present: {e}"))?;
-                log::debug!(
+                log::trace!(
                     "pocket-widget: cpu present total {:.2}ms (fb {}x{} -> client {}x{}; \
                      blit {:.2}ms, {} rect(s))",
                     started.elapsed().as_secs_f64() * 1000.0,
@@ -1179,7 +1179,7 @@ impl<D: Driver> ApplicationHandler for WidgetApp<D> {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
-                log::debug!("pocket-widget: Resized {size:?}");
+                log::trace!("pocket-widget: Resized {size:?}");
                 match &mut state.present {
                     Present::Wgpu {
                         surface,
@@ -1200,12 +1200,12 @@ impl<D: Driver> ApplicationHandler for WidgetApp<D> {
                 self.arms.resized += 1;
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                log::debug!("pocket-widget: ScaleFactorChanged({scale_factor})");
+                log::trace!("pocket-widget: ScaleFactorChanged({scale_factor})");
                 state.render_pending = true;
                 self.arms.scale += 1;
             }
             WindowEvent::Occluded(occluded) => {
-                log::debug!("pocket-widget: Occluded({occluded})");
+                log::trace!("pocket-widget: Occluded({occluded})");
                 state.occluded = occluded;
                 if !occluded {
                     state.render_pending = true; // repaint on reveal

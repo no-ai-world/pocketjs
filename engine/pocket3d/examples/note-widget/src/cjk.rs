@@ -389,7 +389,7 @@ impl CjkAtlases {
         self.source_resolved = true;
         self.source = match GlyphSource::find() {
             Some((source, name)) => {
-                log::info!("note-widget: CJK fallback font {name}");
+                log::debug!("note-widget: CJK fallback font {name}");
                 Some(source)
             }
             None => {
@@ -438,7 +438,7 @@ impl CjkAtlases {
             }
         }
         if !blobs.is_empty() {
-            log::info!(
+            log::debug!(
                 "note-widget: extended {} font slot(s) with {} new glyph(s)",
                 blobs.len(),
                 missing.len()

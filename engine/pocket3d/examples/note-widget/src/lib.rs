@@ -35,6 +35,7 @@
 pub mod cjk;
 pub mod clipboard;
 pub mod companion;
+pub mod file_logger;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -491,7 +492,7 @@ impl NoteGame {
             .as_ref()
             .map(|r| r.stats())
             .unwrap_or((0, 0, 0, 0));
-        log::info!(
+        log::trace!(
             "mem: qjs_heap={}KB (str={}KB obj={}KB prop={}KB shape={}KB code={}KB)\n\
              mem: words={}/{} ui_nodes={} ({:.1}MB) styles={} textures={} ({:.1}MB) \
              font={}KB/{}g discs={} anims={}\n\
@@ -650,7 +651,7 @@ impl NoteGame {
             self.ensure_text(&text);
             self.shell_svc(serde_json::json!({"t": "load", "text": text}));
         }
-        log::info!(
+        log::trace!(
             "note-widget: {} ({} bytes)",
             self.file.display(),
             text.len()
@@ -668,7 +669,7 @@ impl NoteGame {
         let tmp = self.file.with_extension("md.tmp");
         let write = std::fs::write(&tmp, text).and_then(|()| replace_file(&tmp, &self.file));
         match write {
-            Ok(()) => log::info!("note-widget: saved {} bytes", text.len()),
+            Ok(()) => log::trace!("note-widget: saved {} bytes", text.len()),
             Err(e) => log::warn!("note-widget: save failed: {e}"),
         }
     }
@@ -1089,7 +1090,7 @@ impl FlatWidget for NoteGame {
             (hash, (hash != self.hash).then(|| words.clone()))
         });
         if let Some(words) = words {
-            log::debug!("note-widget: DrawList changed at tick {}", self.ticks);
+            log::trace!("note-widget: DrawList changed at tick {}", self.ticks);
             self.words = words;
             self.hash = hash;
             self.dirty = true;
@@ -1161,7 +1162,7 @@ impl FlatWidget for NoteGame {
                 )
             })
             .map_err(|e| anyhow!("cpu damage plan failed: {e:?}"))?;
-        log::debug!(
+        log::trace!(
             "note-widget: cpu frame {}x{}@{}x ({} region(s)) in {:.2}ms",
             width,
             height,
@@ -1333,6 +1334,8 @@ struct Args {
     companion_args: Vec<String>,
     /// Working directory for the companion program.
     companion_cwd: Option<PathBuf>,
+    /// Optional log file: file gets INFO+ (DEBUG+ in debug builds), stderr keeps INFO+.
+    log_file: Option<PathBuf>,
 }
 
 /// Parse a logical window bound from the launcher's `WIDTHxHEIGHT` form.
@@ -1503,6 +1506,7 @@ fn parse_args() -> Result<Args> {
         companion: None,
         companion_args: Vec::new(),
         companion_cwd: None,
+        log_file: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -1542,6 +1546,7 @@ fn parse_args() -> Result<Args> {
             "--companion" => args.companion = Some(PathBuf::from(val("--companion")?)),
             "--companion-arg" => args.companion_args.push(val("--companion-arg")?),
             "--companion-cwd" => args.companion_cwd = Some(PathBuf::from(val("--companion-cwd")?)),
+            "--log-file" => args.log_file = Some(PathBuf::from(val("--log-file")?)),
             "--screenshot" => args.screenshot = Some(PathBuf::from(val("--screenshot")?)),
             "--frames" => args.frames = val("--frames")?.parse()?,
             "--cpu-render" => args.cpu_render = true,
@@ -1849,7 +1854,7 @@ fn run_with_args(mut args: Args) -> Result<()> {
             std::mem::take(&mut args.companion_args),
             args.companion_cwd.take(),
         )?;
-        log::info!("note-widget: companion {}", program.display());
+        log::debug!("note-widget: companion {}", program.display());
         game.companion = Some(bridge);
     }
 
@@ -1895,7 +1900,7 @@ fn run_with_args(mut args: Args) -> Result<()> {
             }
         };
         if args.cpu_render {
-            log::info!("note-widget: CPU present path (--cpu-render, no wgpu device)");
+            log::debug!("note-widget: CPU present path (--cpu-render, no wgpu device)");
             pocket_widget::run_flat_cpu(config, game)
         } else {
             pocket_widget::run_flat(config, game)
@@ -1914,8 +1919,12 @@ pub fn run() -> Result<()> {
 /// The app-widget shell never exposes note document/save/quit semantics —
 /// it is the generic desktop App Shell for arbitrary `*-main.js/.pak` apps.
 pub fn run_app() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let mut args = parse_args()?;
+    if let Some(log_file) = &args.log_file {
+        file_logger::init(log_file)?;
+    } else {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    }
     if args.chrome == ChromeMode::Note {
         log::warn!("app-widget: ignoring --chrome note; app-widget is app-only");
     }

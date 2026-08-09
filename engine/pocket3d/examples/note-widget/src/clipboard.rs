@@ -31,7 +31,7 @@ pub fn copy(text: &str) {
         return;
     }
     match with_clipboard(|clipboard| clipboard.set_text(text.to_owned())) {
-        Ok(()) => log::info!("note-widget: copied {} bytes", text.len()),
+        Ok(()) => log::trace!("note-widget: copied {} bytes", text.len()),
         Err(error) => log::warn!("note-widget: clipboard copy failed: {error}"),
     }
 }
