@@ -33,6 +33,8 @@ serde_json = { workspace = true }
 ab_glyph = { workspace = true }
 memmap2 = { workspace = true }
 arboard = { workspace = true }
+# 本地时间戳（file_logger）：chrono 是 Rust 事实标准时间库，全平台一致。
+chrono = "0.4"
 # Window-icon decode: .ico inputs only (PNG/BMP cover the two ICONDIR
 # entry encodings); never a conversion chain.
 image = { version = "0.25", default-features = false, features = ["ico", "png", "bmp"] }

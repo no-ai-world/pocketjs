@@ -34,31 +34,9 @@ impl DualLogger {
     }
 }
 
-/// days since 1970-01-01 → (year, month, day)。Hinnant 公历算法，零依赖。
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-/// UTC 时间戳 `YYYY-MM-DD HH:MM:SS`（无第三方时间依赖）。
-fn utc_timestamp() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = secs / 86_400;
-    let rem = secs % 86_400;
-    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    let (year, month, day) = civil_from_days(days as i64);
-    format!("{year:04}-{month:02}-{day:02} {hh:02}:{mm:02}:{ss:02}")
+/// 本地时间戳 `YYYY-MM-DD HH:MM:SS`（chrono Local，全平台统一本地时区）。
+fn local_timestamp() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
 impl log::Log for DualLogger {
@@ -74,7 +52,7 @@ impl log::Log for DualLogger {
         }
         let line = format!(
             "[{} {} {}] {}\n",
-            utc_timestamp(),
+            local_timestamp(),
             record.level(),
             record.target(),
             record.args()
@@ -131,4 +109,25 @@ pub fn init(path: &Path) -> anyhow::Result<()> {
     // 唯一可能 Err 的路径：logger 已存在（重复 init 是调用方 bug，保持 loud）
     log::set_logger(logger)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 时间戳必须与 chrono::Local 时钟一致（±2 秒内）。用 naive 本地墙钟直接
+    /// 比较：若实现误用 Utc，差值会是一整个时区偏移，断言立即失败。
+    #[test]
+    fn local_timestamp_tracks_local_clock() {
+        let ts = local_timestamp();
+        assert_eq!(ts.len(), 19, "timestamp shape: {ts}");
+        let parsed = chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%d %H:%M:%S")
+            .expect("parse timestamp");
+        let local_now = chrono::Local::now().naive_local();
+        let drift = (parsed - local_now).num_seconds().abs();
+        assert!(
+            drift <= 2,
+            "local_timestamp {ts} diverges from Local clock by {drift}s (now {local_now})"
+        );
+    }
 }
