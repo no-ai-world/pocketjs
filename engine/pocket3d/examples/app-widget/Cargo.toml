@@ -10,7 +10,8 @@ description = "The generic PocketJS desktop App Shell for arbitrary app bundles"
 anyhow = { workspace = true }
 note-widget = { path = "../note-widget" }
 
-[build-dependencies]
-# Embeds the launcher-supplied .ico (POCKETJS_ICON) as RT_ICON resources;
-# app-widget builds as its own binary and needs its own resource tool.
-winresource = "0.1"
+# No build.rs: note-widget (the linked runtime library) already embeds the
+# launcher-supplied .ico (POCKETJS_ICON) as RT_ICON resources, and winresource
+# links them with +whole-archive into every binary that links the library —
+# including this app shell. A second embed here would duplicate every
+# .rsrc leaf (VERSION/GROUP_ICON/ICON) at link time.

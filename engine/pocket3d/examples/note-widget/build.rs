@@ -1,5 +1,12 @@
 //! Embed a launcher-supplied `.ico` as the exe's icon resources on Windows.
 //!
+//! This is the single icon embedder for the PocketJS desktop shell family:
+//! it serves both the `note-widget` binary and the `app-widget` binary, which
+//! links this package as its runtime library. winresource links the compiled
+//! resources with `+whole-archive`, so the .rsrc segment reaches every binary
+//! that links this library — a second embed anywhere else would duplicate
+//! every leaf (VERSION/GROUP_ICON/ICON) at link time.
+//!
 //! The desktop launchers (`tools/desktop-icon.ts`) set `POCKETJS_ICON` to the
 //! validated absolute `.ico` path before `cargo build`; when it is absent no
 //! icon is embedded and the exe keeps the system default. Non-Windows targets
